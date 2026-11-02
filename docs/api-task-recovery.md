@@ -24,7 +24,8 @@ within a Run. Legacy records without a key remain blocked from replay.
 
 Browser workflows receive a node recovery ID automatically. Save the workflow
 to preserve it across reloads. Keep inputs, seed and generation unchanged to
-resume a task. Use **Regenerate on next run** to explicitly start another video.
+resume a task. To start another video, click **Generate new video** and confirm,
+then click **Run** when the button shows **Ready for new generation — click Run**.
 
 Recovery uses the saved query address, without requiring fresh route discovery.
 Records live under `benpay-video-tasks` in the ComfyUI user directory and contain

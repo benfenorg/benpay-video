@@ -39,7 +39,8 @@ is saved to ComfyUI's output directory.
 
 If querying or downloading fails, rerun the same node with unchanged inputs to
 resume its task. Keep the seed fixed when retrying. Successful downloads are
-reused; click **Regenerate on next run** and confirm to create another video.
+reused. To create another video, click **Generate new video** and confirm, then
+click **Run** when the button shows **Ready for new generation — click Run**.
 Save your workflow to keep task recovery available after reloading.
 Creating a new task may incur another charge even if an earlier task is running.
 MiniMax image-to-video uses the **adaptive** aspect ratio; text-to-video supports
