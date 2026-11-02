@@ -47,7 +47,7 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "comfyui-setup"):
             configuration.read_api_key(self.config_path)
         self.config_path.write_text("{invalid", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "格式无效"):
+        with self.assertRaisesRegex(ValueError, "config.json is invalid"):
             configuration.read_api_key(self.config_path)
 
     def test_ui_status_never_returns_complete_key(self) -> None:
