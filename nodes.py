@@ -192,8 +192,6 @@ def _redact_response(value: object, secrets: list[str]) -> object:
             "sign",
             "signature",
             "csrftoken",
-            "images",
-            "referencevideos",
         }
         return {
             key: "[redacted]"
@@ -204,8 +202,6 @@ def _redact_response(value: object, secrets: list[str]) -> object:
     if isinstance(value, list):
         return [_redact_response(item, secrets) for item in value]
     if isinstance(value, str):
-        if value.startswith("data:"):
-            return "[redacted media]"
         for secret in secrets:
             if secret:
                 value = value.replace(secret, "[redacted]")
@@ -220,6 +216,20 @@ def _redact_response(value: object, secrets: list[str]) -> object:
         )
         return re.sub(r"(?i)Bearer\s+[^\s\"'<>]+", "Bearer [redacted]", value)
     return value
+
+
+def _log_api_request(
+    method: str, url: str, headers: dict | None = None, payload: dict | None = None
+) -> None:
+    authorization = (headers or {}).get("Authorization", "")
+    secrets = [authorization, authorization.removeprefix("Bearer ")]
+    LOGGER.info(
+        "[BenPay] %s %s request: headers=%s JSON=%s",
+        method,
+        _redact_response(url, secrets),
+        json.dumps(_redact_response(headers or {}, secrets), ensure_ascii=False),
+        json.dumps(_redact_response(payload, secrets), ensure_ascii=False),
+    )
 
 
 def _log_api_response(
@@ -245,6 +255,7 @@ def _log_api_response(
 
 def _fetch_supplier_catalog() -> dict[str, list[dict[str, str]]]:
     request = Request(_supplier_request_url(), headers={"Accept": "application/json"})
+    _log_api_request("GET", request.full_url)
     with urlopen(request, timeout=SUPPLIER_REQUEST_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
         _log_api_response("GET", request.full_url, response.status, payload)
@@ -259,6 +270,7 @@ def _fetch_video_protocol_routes() -> dict[str, dict[str, str]]:
     request = Request(
         _call_config_request_url(), headers={"Accept": "application/json"}
     )
+    _log_api_request("GET", request.full_url)
     with urlopen(request, timeout=SUPPLIER_REQUEST_TIMEOUT_SECONDS) as response:
         payload = json.loads(response.read().decode("utf-8"))
         _log_api_response("GET", request.full_url, response.status, payload)
@@ -379,6 +391,7 @@ async def _request_json(
     headers: dict[str, str],
     payload: dict | None = None,
 ) -> dict:
+    _log_api_request(method, url, headers, payload)
     async with session.request(
         method, url, headers=headers, json=payload, allow_redirects=False
     ) as response:
@@ -464,10 +477,12 @@ async def _download_video(
     output_path = output_dir / f"benpay_video_{safe_task_id}_{uuid4().hex[:8]}.mp4"
 
     try:
+        _log_api_request("GET", video_url)
         async with session.get(
             video_url,
             timeout=aiohttp.ClientTimeout(total=VIDEO_DOWNLOAD_TIMEOUT_SECONDS),
         ) as response:
+            _log_api_response("GET", video_url, response.status, None)
             if response.status >= 400:
                 raise RuntimeError(
                     f"Video download failed with HTTP {response.status}."
@@ -498,6 +513,8 @@ def _prompt_text(prompt: str) -> str:
     prompt = prompt.strip()
     if not prompt:
         raise ValueError("Prompt cannot be empty.")
+    if len(prompt) > 7000:
+        raise ValueError("Prompt must contain at most 7000 characters.")
     return prompt
 
 
@@ -601,20 +618,20 @@ def _build_request_body(
         raise ValueError("Doubao supports at most 4 reference videos.")
 
     if protocol == "doubao":
-        mode = {
-            "text_to_video": "t2v",
-            "first_frame": "i2v_first_frame",
-            "first_last_frame": "i2v_first_last_frame",
-            "reference_images": "multi_ref",
-            "reference_video": "multi_ref_vid",
-        }[image_mode]
         metadata = {
             "resolution": resolution,
             "ratio": ratio,
             "duration": duration,
+            "generate_audio": True,
             "seed": seed,
             "watermark": False,
-            "mode": mode,
+            "mode": {
+                "text_to_video": "t2v",
+                "first_frame": "i2v_first_frame",
+                "first_last_frame": "i2v_first_last_frame",
+                "reference_images": "multi_ref",
+                "reference_video": "multi_ref_vid",
+            }[image_mode],
         }
         body = {
             "model": model,
@@ -622,7 +639,7 @@ def _build_request_body(
             "images": images,
             "metadata": metadata,
         }
-        if reference_videos:
+        if reference_videos or image_mode == "text_to_video":
             body["reference_videos"] = reference_videos
         return body
 
@@ -762,6 +779,17 @@ async def _generate_video(
     # The OS lock spans creation, polling and download, and releases on cancel.
     with journal:
         record = journal.load()
+        if (
+            record
+            and record["state"] == "failed"
+            and record.get("status")
+            in {
+                "failed",
+                "failure",
+            }
+        ):
+            journal.retry_failed(record)
+            record = None
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=60)
         ) as session:
@@ -938,8 +966,25 @@ async def _resume_video_task(
     if record["state"] == "failed" and (
         record.get("task_error") or record.get("status") == "missing"
     ):
+        details = record.get("task_error")
+        if details and request_body is not None:
+            # The journal identity already verified this request's fingerprint.
+            # Reformat its inputs using today's masking rules, not a saved view.
+            reason = details.partition("\nIdempotency-Key:")[0]
+            response_text = details.partition("\nresponse: ")[2]
+            try:
+                response = json.loads(response_text)
+            except json.JSONDecodeError:
+                response = "Previous response was not saved completely."
+            details = _request_error_details(
+                reason,
+                journal.idempotency_key or "not recorded",
+                request_body,
+                response,
+                headers,
+            )
         raise TaskRecoveryError(
-            record.get("task_error")
+            details
             or f"Task {task_id} has ended. Choose Generate new video to start another task."
         )
     output_file = record.get("output_file", "")
@@ -992,7 +1037,7 @@ async def _resume_video_task(
                     f"{error.get('code', 'API error')}: {error.get('message', status)}"
                 )
             details = _request_error_details(
-                f"{reason or status} (task {task_id}; choose Generate new video to start another)",
+                f"{reason or status} (task {task_id}; click Run to retry with a new task)",
                 journal.idempotency_key or "not recorded",
                 request_body or {},
                 response,

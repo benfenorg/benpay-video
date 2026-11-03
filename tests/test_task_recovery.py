@@ -101,6 +101,22 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def records(self):
         return list((self.directory / "benpay-video-tasks").glob("*.json"))
 
+    async def resume_failed_record(self):
+        body = self.functions["_build_request_body"](
+            "doubao", "doubao-seedance-2.0", "private prompt", "720p", 5, "16:9", 42
+        )
+        with recovery.TaskJournal(
+            self.directory / "benpay-video-tasks",
+            "workflow-1/node-1",
+            self.key,
+            {"protocol": "doubao", "body": body},
+            0,
+        ) as journal:
+            record = journal.load()
+            return await self.functions["_resume_video_task"](
+                object(), {"Authorization": f"Bearer {self.key}"}, journal, record, body
+            )
+
     async def test_both_providers_send_key_persisted_before_post_and_regenerate_changes_it(
         self,
     ):
@@ -452,17 +468,77 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("data:image", payload)
             self.assertNotIn("https://example.com/1.mp4", payload)
 
-    async def test_terminal_task_requires_regeneration(self):
+    async def test_each_run_after_confirmed_failure_creates_one_new_attempt(self):
         self.status = "failed"
-        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Generate new video"):
+        with self.assertRaisesRegex(recovery.TaskRecoveryError, "click Run to retry"):
             await self.generate()
-        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Generate new video"):
+        first_key = json.loads(self.records()[0].read_text())["idempotency_key"]
+        with self.assertRaisesRegex(recovery.TaskRecoveryError, "click Run to retry"):
             await self.generate()
-        self.assertEqual(len(self.queries), 1)
-        self.assertEqual(self.created, ["task-1"])
+        retry = json.loads(self.records()[0].read_text())
+        self.assertNotEqual(retry["idempotency_key"], first_key)
+        self.assertEqual(retry["attempt"], 1)
+        self.assertEqual(len(self.queries), 2)
+        self.assertEqual(self.created, ["task-1", "task-2"])
         self.status = "succeeded"
-        await self.generate(generation=1)
-        self.assertEqual(len(self.created), 2)
+        path = await self.generate()
+        self.assertEqual(len(self.created), 3)
+        self.assertEqual(json.loads(self.records()[0].read_text())["attempt"], 2)
+        self.assertEqual(await self.generate(), path)
+        self.assertEqual(len(self.created), 3)
+
+    async def test_lost_retry_creation_response_replays_same_attempt_key(self):
+        self.status = "failed"
+        with self.assertRaises(recovery.TaskRecoveryError):
+            await self.generate()
+        self.functions["_request_json"].side_effect = aiohttp.ClientConnectionError()
+        with self.assertRaises(recovery.TaskRecoveryError):
+            await self.generate()
+        record = json.loads(self.records()[0].read_text())
+        self.assertEqual(record["attempt"], 1)
+        self.assertEqual(record["state"], "creating")
+        retry_key = record["idempotency_key"]
+        self.status = "succeeded"
+        self.functions["_request_json"].side_effect = self.request
+        path = await self.generate()
+        posts = [
+            call
+            for call in self.functions["_request_json"].call_args_list
+            if call.args[1] == "POST"
+        ]
+        self.assertEqual(posts[-2].args[3]["Idempotency-Key"], retry_key)
+        self.assertEqual(posts[-1].args[3]["Idempotency-Key"], retry_key)
+        self.assertEqual(posts[-2].args[4], posts[-1].args[4])
+        self.assertTrue(path.exists())
+
+    async def test_minimax_confirmed_failure_retries_with_new_key(self):
+        options = {"protocol": "minimax", "model": "MiniMax-H3", "resolution": "768P"}
+        self.status = "FAILURE"
+        with self.assertRaises(recovery.TaskRecoveryError):
+            await self.generate(**options)
+        original_key = json.loads(self.records()[0].read_text())["idempotency_key"]
+        self.status = "succeeded"
+        self.assertTrue((await self.generate(**options)).exists())
+        retry = json.loads(self.records()[0].read_text())
+        self.assertNotEqual(retry["idempotency_key"], original_key)
+        self.assertEqual(retry["attempt"], 1)
+        self.assertEqual(self.created, ["task-1", "task-2"])
+
+    async def test_tampered_retry_attempt_is_rejected_before_remote_request(self):
+        self.status = "failed"
+        for _ in range(2):
+            with self.assertRaises(recovery.TaskRecoveryError):
+                await self.generate()
+        record_path = self.records()[0]
+        record = json.loads(record_path.read_text())
+        record["attempt"] += 1
+        record_path.write_text(json.dumps(record))
+        calls = self.functions["_request_json"].await_count
+        with self.assertRaisesRegex(
+            recovery.TaskRecoveryError, "idempotency key mismatch"
+        ):
+            await self.generate()
+        self.assertEqual(self.functions["_request_json"].await_count, calls)
 
     async def test_failed_task_keeps_redacted_reason_and_response_after_restart(self):
         original_request = self.functions["_request_json"].side_effect
@@ -499,7 +575,7 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.key, message)
         self.assertIn("private prompt", message)
         with self.assertRaises(recovery.TaskRecoveryError) as resumed:
-            await self.generate()
+            await self.resume_failed_record()
         self.assertEqual(str(resumed.exception), message)
         self.assertEqual(len(self.queries), 1)
         self.assertEqual(self.created, ["task-1"])
@@ -510,9 +586,33 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         record.pop("task_error")
         record_path.write_text(json.dumps(record))
         with self.assertRaises(recovery.TaskRecoveryError) as legacy:
-            await self.generate()
+            await self.resume_failed_record()
         self.assertEqual(str(legacy.exception), message)
         self.assertEqual(len(self.queries), 2)
+        self.assertEqual(self.created, ["task-1"])
+
+    async def test_cached_failure_uses_current_request_instead_of_old_masked_text(self):
+        self.status = "failed"
+        with self.assertRaises(recovery.TaskRecoveryError):
+            await self.generate()
+        record_path = self.records()[0]
+        record = json.loads(record_path.read_text())
+        record["task_error"] = (
+            record["task_error"]
+            .replace('"prompt": "private prompt"', '"prompt": "[redacted]"')
+            .replace('"images": []', '"images": "[redacted]"')
+        )
+        record_path.write_text(json.dumps(record))
+        calls = self.functions["_request_json"].await_count
+        with self.assertRaises(recovery.TaskRecoveryError) as caught:
+            await self.resume_failed_record()
+        message = str(caught.exception)
+        self.assertIn('"prompt": "private prompt"', message)
+        self.assertIn('"images": []', message)
+        self.assertNotIn('"prompt": "[redacted]"', message)
+        self.assertIn('"status": "failed"', message)
+        self.assertNotIn(self.key, message)
+        self.assertEqual(self.functions["_request_json"].await_count, calls)
         self.assertEqual(self.created, ["task-1"])
 
     async def test_http_200_query_errors_stop_immediately_and_preserve_task(self):
@@ -657,6 +757,38 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.functions["_video_protocol_routes"].assert_not_awaited()
         self.assertEqual(self.created, [])
         self.assertEqual(self.records(), [])
+
+    async def test_both_providers_reject_long_prompts_before_any_remote_request(self):
+        for protocol, model, resolution in [
+            ("doubao", "doubao-seedance-2.0", "720p"),
+            ("minimax", "MiniMax-H3", "768P"),
+        ]:
+            with (
+                self.subTest(protocol=protocol),
+                self.assertRaisesRegex(ValueError, "at most 7000 characters"),
+            ):
+                await self.generate(
+                    protocol=protocol,
+                    model=model,
+                    resolution=resolution,
+                    prompt="猫" * 7001,
+                )
+        self.functions["_request_json"].assert_not_awaited()
+        self.assertEqual(self.records(), [])
+
+    async def test_both_providers_accept_7000_unicode_characters(self):
+        for protocol, model, resolution in [
+            ("doubao", "doubao-seedance-2.0", "720p"),
+            ("minimax", "MiniMax-H3", "768P"),
+        ]:
+            with self.subTest(protocol=protocol):
+                path = await self.generate(
+                    protocol=protocol,
+                    model=model,
+                    resolution=resolution,
+                    prompt="🐈" * 7000,
+                )
+                self.assertTrue(path.exists())
 
     async def test_unused_materials_are_not_validated_or_sent(self):
         image_converter = self.functions["_image_data_urls"]
@@ -859,6 +991,79 @@ class RecoveryIdentityTests(unittest.TestCase):
 
 
 class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_every_request_is_logged_before_response_or_connection_error(self):
+        functions = load_node_functions("_request_json")
+
+        @asynccontextmanager
+        async def request(*_args, **_kwargs):
+            raise aiohttp.ClientConnectionError("test connection failed")
+            yield  # pragma: no cover - establishes an async context manager
+
+        with (
+            self.assertLogs("benpay_test.nodes", level="INFO") as logged,
+            self.assertRaises(aiohttp.ClientConnectionError),
+        ):
+            await functions["_request_json"](
+                types.SimpleNamespace(request=request),
+                "POST",
+                "https://example.com/create",
+                {"Authorization": "Bearer private-key", "Idempotency-Key": "request-1"},
+                {
+                    "prompt": "原始提示词",
+                    "images": [],
+                    "reference_videos": [],
+                    "token": "private-token",
+                },
+            )
+        output = "\n".join(logged.output)
+        for expected in [
+            "POST https://example.com/create request:",
+            "request-1",
+            "原始提示词",
+            '"images": []',
+            '"reference_videos": []',
+        ]:
+            self.assertIn(expected, output)
+        self.assertNotIn("private-key", output)
+        self.assertNotIn("private-token", output)
+
+    def test_media_inputs_are_visible_but_credentials_remain_redacted(self):
+        functions = load_node_functions("_request_error_details")
+        body = {
+            "prompt": "A cat",
+            "images": ["data:image/png;base64,aW1hZ2U="],
+            "reference_videos": ["https://example.com/reference.mp4"],
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aW1hZ2U="},
+                }
+            ],
+            "apiKey": "different-api-key",
+            "token": "private-token",
+        }
+        details = functions["_request_error_details"](
+            "Echo actual-api-key",
+            "idempotency-1",
+            body,
+            {"access_token": "private-access-token"},
+            {"Authorization": "Bearer actual-api-key"},
+        )
+        self.assertIn("data:image/png;base64,aW1hZ2U=", details)
+        self.assertIn("https://example.com/reference.mp4", details)
+        self.assertIn('"prompt": "A cat"', details)
+        for secret in [
+            "actual-api-key",
+            "different-api-key",
+            "private-token",
+            "private-access-token",
+        ]:
+            self.assertNotIn(secret, details)
+        empty = functions["_request_error_details"](
+            "Failed", "key-1", {"images": []}, {}, {}
+        )
+        self.assertIn('"images": []', empty)
+
     def test_multimodal_prompt_text_is_preserved_without_request_context(self):
         functions = load_node_functions("_redact_response")
         response = {
@@ -933,10 +1138,10 @@ class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"code": "upstream_error"', output)
         self.assertIn("HTTP 200", output)
         self.assertIn('"prompt": "private prompt"', output)
+        self.assertIn('"images": ["private-media"]', output)
         for secret in (
             "private-key",
             "private-secret",
-            "private-media",
             "private-query-token",
         ):
             self.assertNotIn(secret, output)

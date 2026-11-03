@@ -22,6 +22,13 @@ then resumes polling using the returned task ID. Request fingerprints ensure
 changed parameters cannot reuse that record or key. There is no retry loop
 within a Run. Legacy records without a key remain blocked from replay.
 
+If the remote task has definitively failed (`failed` or `failure`), the next Run
+starts one new attempt with a new key. That attempt and key are persisted before
+POST, so a lost creation response is recovered using the same retry key. There
+is no automatic loop creating tasks within a Run. Each new attempt may incur
+charges. Query, download, missing-task and configuration errors do not trigger
+a new attempt.
+
 Browser workflows receive a node recovery ID automatically. Save the workflow
 to preserve it across reloads. Keep inputs, seed and generation unchanged to
 resume a task. To start another video, click **Generate new video** and confirm,
@@ -30,7 +37,7 @@ then click **Run** when the button shows **Ready for new generation — click Ru
 Recovery uses the saved query address, without requiring fresh route discovery.
 Records live under `benpay-video-tasks` in the ComfyUI user directory and contain
 task IDs, query addresses and fingerprints. Saved error diagnostics include prompt
-text; API key values, media contents and URL query values are redacted. Corrupt
+text and media inputs; API key values, tokens and URL query values are redacted. Corrupt
 records stop automatic creation.
 
 If a creation result is unconfirmed, check the remote task list before

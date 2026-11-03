@@ -1,4 +1,4 @@
-"""Persist video task identities and error diagnostics without credentials or media."""
+"""Persist video task identities and error diagnostics without credentials."""
 
 import hashlib
 import json
@@ -83,6 +83,7 @@ class TaskJournal:
             "generation": generation,
         }
         self.path = directory / f"{fingerprint(self.identity)}.json"
+        self.attempt = 0
         self.idempotency_key = "benpay-video-" + (
             fingerprint(self.identity) if self.persistent else uuid4().hex
         )
@@ -155,6 +156,12 @@ class TaskJournal:
             value.get(key) != expected for key, expected in self.identity.items()
         ):
             raise TaskRecoveryError("Task recovery identity mismatch.")
+        attempt = value.get("attempt", 0)
+        if type(attempt) is not int or attempt < 0:
+            raise TaskRecoveryError("Invalid task recovery attempt.")
+        self.attempt = attempt
+        if attempt:
+            self.idempotency_key = self._retry_key(attempt)
         if "idempotency_key" in value:
             if value["idempotency_key"] != self.idempotency_key:
                 raise TaskRecoveryError("Task recovery idempotency key mismatch.")
@@ -183,6 +190,19 @@ class TaskJournal:
             raise TaskRecoveryError("Invalid recovered task error.")
         return value
 
+    def _retry_key(self, attempt: int) -> str:
+        return "benpay-video-" + fingerprint([self.identity, attempt])
+
+    def retry_failed(self, record: dict) -> None:
+        """Start a distinct attempt only after a confirmed remote failure."""
+        if record.get("state") != "failed" or record.get("status") not in {
+            "failed",
+            "failure",
+        }:
+            raise TaskRecoveryError("Only a confirmed failed task can be retried.")
+        self.attempt += 1
+        self.idempotency_key = self._retry_key(self.attempt)
+
     def save(self, state: str, **fields: str) -> dict:
         if set(fields) - {
             "task_id",
@@ -194,6 +214,8 @@ class TaskJournal:
         }:
             raise TaskRecoveryError("Unexpected task recovery fields.")
         value = {**self.identity, "state": state, **fields}
+        if self.attempt:
+            value["attempt"] = self.attempt
         for name in ("creation_error", "task_error"):
             if name in value:
                 value[name] = _bounded_diagnostic(value[name])

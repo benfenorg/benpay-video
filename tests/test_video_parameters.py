@@ -209,6 +209,9 @@ class VideoParameterTests(unittest.TestCase):
         )
         self.assertEqual(body["metadata"]["resolution"], "720p")
         self.assertEqual(body["metadata"]["duration"], 5)
+        self.assertEqual(body["metadata"]["mode"], "t2v")
+        self.assertIs(body["metadata"]["generate_audio"], True)
+        self.assertEqual(body["reference_videos"], [])
 
     def test_image_to_video_preserves_resolution_and_duration(self):
         body = build_request_body(
@@ -223,6 +226,7 @@ class VideoParameterTests(unittest.TestCase):
             images=["data:image/png;base64,test"],
         )
         self.assertEqual(body["metadata"]["mode"], "i2v_first_frame")
+        self.assertIs(body["metadata"]["generate_audio"], True)
         self.assertEqual(body["metadata"]["resolution"], "720p")
         self.assertEqual(body["metadata"]["duration"], 5)
 

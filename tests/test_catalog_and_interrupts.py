@@ -47,6 +47,7 @@ def load_node_functions(*names):
         "_is_readable_video",
         "_redact_response",
         "_log_api_response",
+        "_log_api_request",
     }
     tree = ast.parse((ROOT / "nodes.py").read_text(encoding="utf-8"))
     definitions = [
