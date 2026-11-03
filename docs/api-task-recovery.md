@@ -29,8 +29,9 @@ then click **Run** when the button shows **Ready for new generation — click Ru
 
 Recovery uses the saved query address, without requiring fresh route discovery.
 Records live under `benpay-video-tasks` in the ComfyUI user directory and contain
-task IDs, query addresses and fingerprints, without API key values, prompts or
-input media. Corrupt records stop automatic creation.
+task IDs, query addresses and fingerprints. Saved error diagnostics include prompt
+text; API key values, media contents and URL query values are redacted. Corrupt
+records stop automatic creation.
 
 If a creation result is unconfirmed, check the remote task list before
 regenerating. The provider may already be processing the original request, and

@@ -3,6 +3,7 @@ import { api } from "../../scripts/api.js";
 
 const fallback = {
   configureKey: "Configure API Key",
+  controlAfterGenerate: "Control after generate",
   regenerate: "Generate new video",
   regenerateReady: "Ready for new generation — click Run",
   regenerateConfirm:

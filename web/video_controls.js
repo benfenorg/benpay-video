@@ -7,6 +7,7 @@ export function bindVideoControls(node) {
   const protocol = widget("protocol");
   const ratio = widget("ratio");
   const resolution = widget("resolution");
+  const seed = widget("seed");
   const generation = widget("generation");
   const imageMode = widget("image_mode");
   const referenceVideos = widget("reference_video_urls");
@@ -23,6 +24,10 @@ export function bindVideoControls(node) {
       ).join("");
     }
     if (!protocol || !ratio) return;
+    if (seed) {
+      seed.options.min = -1;
+      seed.options.max = 2147483647;
+    }
     if (resolution) {
       const minimax = protocol.value === "minimax";
       const resolutions = minimax
@@ -81,6 +86,9 @@ export function bindVideoControls(node) {
   };
 
   if (generation) {
+    // Keep the recovery identifier in workflows, but let the button manage it.
+    generation.hidden = true;
+    generation.options = { ...generation.options, hidden: true };
     regenerateButton = node.addWidget("button", t("regenerate"), null, () => {
       if (!window.confirm(t("regenerateConfirm"))) return;
       if (generation.value >= 0x7fffffff) return;

@@ -16,6 +16,7 @@ const regenerateButtons = new Map();
 let lastStatus = null;
 let statusMessage = "checking";
 let activeDialog = null;
+let automaticallyPrompted = false;
 let promptedWorkflow = null;
 
 function displayStatus(status) {
@@ -43,8 +44,9 @@ function renderStatus() {
 }
 
 function localizeNodeOptions(node) {
+  const seedControl = node.widgets.find((widget) => widget.name === "control_after_generate");
+  if (seedControl) seedControl.label = t("controlAfterGenerate");
   const choices = {
-    protocol: { prefix: "provider", values: ["doubao", "minimax"] },
     image_mode: {
       prefix: "mode",
       values: [
@@ -92,6 +94,51 @@ function showKeyDialog() {
   });
   activeDialog = pending;
   return activeDialog;
+}
+
+async function promptForMissingKey(startup = false) {
+  try {
+    const status = await refreshStatus();
+    if (status.configured || (startup && automaticallyPrompted)) return;
+    if (startup) automaticallyPrompted = true;
+    // Do not block ComfyUI startup while waiting for the user to close the dialog.
+    showKeyDialog().catch(() => {});
+  } catch {
+    statusMessage = "statusUnavailable";
+    renderStatus();
+  }
+}
+
+function usesBenPayNodes(output, targets) {
+  const pending = targets?.length ? [...targets] : Object.keys(output);
+  const visited = new Set();
+  while (pending.length) {
+    const id = String(pending.pop());
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const node = output[id];
+    if (!node) continue;
+    if (nodeTypes.has(node.class_type)) return true;
+    for (const input of Object.values(node.inputs || {})) {
+      if (
+        Array.isArray(input) && input.length === 2 &&
+        typeof input[0] === "string" && Number.isInteger(input[1]) && output[input[0]]
+      ) pending.push(input[0]);
+    }
+  }
+  return false;
+}
+
+function checkConfigurationBeforeQueueing() {
+  const queuePrompt = api.queuePrompt;
+  api.queuePrompt = async function (number, prompt, ...args) {
+    const usesBenPay = usesBenPayNodes(prompt.output || {}, args[0]?.partialExecutionTargets);
+    if (usesBenPay && !(await refreshStatus()).configured) {
+      await showKeyDialog();
+      if (!(await refreshStatus()).configured) throw new Error(t("keyMissing"));
+    }
+    return queuePrompt.call(this, number, prompt, ...args);
+  };
 }
 
 function createDialogElements() {
@@ -204,6 +251,17 @@ app.registerExtension({
   name: "BenPay.ConfigurationStatus",
   async setup() {
     await loadTranslations();
+    checkConfigurationBeforeQueueing();
+    api.addEventListener("executing", ({ detail }) => {
+      const id = detail?.display_node ?? detail?.node;
+      if (id == null) return;
+      for (const [node, button] of regenerateButtons) {
+        if (String(node.id) !== String(id) || !button?.readyForGeneration) continue;
+        button.readyForGeneration = false;
+        button.name = t("regenerate");
+        node.setDirtyCanvas(true, true);
+      }
+    });
     onLanguageChange(() => {
       renderStatus();
       const dialog = document.querySelector(
@@ -216,12 +274,9 @@ app.registerExtension({
       if (!detail.exception_type?.endsWith(".ConfigurationError")) return;
       if (detail.prompt_id && promptedWorkflow === detail.prompt_id) return;
       promptedWorkflow = detail.prompt_id;
-      try {
-        if (!(await refreshStatus()).configured) await showKeyDialog();
-      } catch {
-        // Keep the configuration button available when status lookup fails.
-      }
+      await promptForMissingKey();
     });
+    await promptForMissingKey(true);
   },
   async nodeCreated(node) {
     if (!nodeTypes.has(node.comfyClass)) return;

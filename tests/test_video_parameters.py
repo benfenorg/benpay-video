@@ -11,7 +11,8 @@ tree = ast.parse(SOURCE.read_text())
 definitions = [
     node
     for node in tree.body
-    if isinstance(node, ast.FunctionDef) and node.name == "_build_request_body"
+    if isinstance(node, ast.FunctionDef)
+    and node.name in {"_build_request_body", "_validate_seed"}
 ]
 namespace = {}
 exec(  # noqa: S102 - executes only the local pure function under test.
@@ -22,6 +23,36 @@ build_request_body = namespace["_build_request_body"]
 
 
 class VideoParameterTests(unittest.TestCase):
+    def test_doubao_seed_boundaries(self):
+        for seed in [-1, 0, 42, 2147483647]:
+            body = build_request_body(
+                "doubao", "test-model", "prompt", "720p", 5, "16:9", seed
+            )
+            self.assertEqual(body["metadata"]["seed"], seed)
+        for seed in [-2, 2147483648, 177105252971010, True, 1.5]:
+            with (
+                self.subTest(seed=seed),
+                self.assertRaisesRegex(ValueError, "seed must be an integer"),
+            ):
+                build_request_body(
+                    "doubao", "test-model", "prompt", "720p", 5, "16:9", seed
+                )
+
+    def test_minimax_seed_boundaries_match_doubao(self):
+        for seed in [-1, 0, 42, 2147483647]:
+            body = build_request_body(
+                "minimax", "MiniMax-H3", "prompt", "768P", 5, "16:9", seed
+            )
+            self.assertEqual(body["seed"], seed)
+        for seed in [-2, 2147483648, 177105252971010, True, 1.5]:
+            with (
+                self.subTest(seed=seed),
+                self.assertRaisesRegex(ValueError, "seed must be an integer"),
+            ):
+                build_request_body(
+                    "minimax", "MiniMax-H3", "prompt", "768P", 5, "16:9", seed
+                )
+
     def test_doubao_reference_video_limit(self):
         for count in [4, 5]:
             videos = [f"https://example.com/{index}.mp4" for index in range(count)]

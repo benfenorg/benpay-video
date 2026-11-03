@@ -269,7 +269,7 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('request: {"model":', message)
         self.assertIn('response: {"error":', message)
         self.assertNotIn(self.key, message)
-        self.assertNotIn("private prompt", message)
+        self.assertIn("private prompt", message)
         self.assertEqual(self.functions["_request_json"].await_count, 1)
         with self.assertRaises(recovery.TaskRecoveryError) as resumed:
             await self.generate()
@@ -454,9 +454,9 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_terminal_task_requires_regeneration(self):
         self.status = "failed"
-        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Regenerate"):
+        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Generate new video"):
             await self.generate()
-        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Regenerate"):
+        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Generate new video"):
             await self.generate()
         self.assertEqual(len(self.queries), 1)
         self.assertEqual(self.created, ["task-1"])
@@ -464,11 +464,102 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.generate(generation=1)
         self.assertEqual(len(self.created), 2)
 
+    async def test_failed_task_keeps_redacted_reason_and_response_after_restart(self):
+        original_request = self.functions["_request_json"].side_effect
+        response = {
+            "code": "success",
+            "data": {
+                "task_id": "task-1",
+                "status": "FAILURE",
+                "fail_reason": f"Upstream rejected private prompt with {self.key}",
+                "result_url": "https://storage.example/video.mp4?signature=private-signature",
+            },
+        }
+
+        async def request(session, method, url, headers, body=None):
+            if method == "POST":
+                return await original_request(session, method, url, headers, body)
+            self.queries.append(url)
+            return response
+
+        self.functions["_request_json"].side_effect = request
+        with self.assertRaises(recovery.TaskRecoveryError) as failed:
+            await self.generate()
+        message = str(failed.exception)
+        self.assertTrue(
+            message.startswith("Upstream rejected private prompt with [redacted]")
+        )
+        for expected in [
+            "Idempotency-Key:",
+            "request:",
+            "response:",
+            '"status": "FAILURE"',
+        ]:
+            self.assertIn(expected, message)
+        self.assertNotIn(self.key, message)
+        self.assertIn("private prompt", message)
+        with self.assertRaises(recovery.TaskRecoveryError) as resumed:
+            await self.generate()
+        self.assertEqual(str(resumed.exception), message)
+        self.assertEqual(len(self.queries), 1)
+        self.assertEqual(self.created, ["task-1"])
+        self.assertNotIn(self.key, self.records()[0].read_text())
+        self.assertNotIn("private-signature", self.records()[0].read_text())
+        record_path = self.records()[0]
+        record = json.loads(record_path.read_text())
+        record.pop("task_error")
+        record_path.write_text(json.dumps(record))
+        with self.assertRaises(recovery.TaskRecoveryError) as legacy:
+            await self.generate()
+        self.assertEqual(str(legacy.exception), message)
+        self.assertEqual(len(self.queries), 2)
+        self.assertEqual(self.created, ["task-1"])
+
+    async def test_http_200_query_errors_stop_immediately_and_preserve_task(self):
+        responses = [
+            {"error": {"code": "invalid_api_key", "message": "Invalid API Key"}},
+            {"code": 401, "msg": "Invalid API Key"},
+        ]
+        original_request = self.request
+        for response in responses:
+            with self.subTest(response=response):
+
+                async def request(
+                    session, method, url, headers, body=None, response=response
+                ):
+                    if method == "POST":
+                        return await original_request(
+                            session, method, url, headers, body
+                        )
+                    self.queries.append(url)
+                    return response
+
+                self.functions["_request_json"].side_effect = request
+                queries = len(self.queries)
+                with self.assertRaisesRegex(
+                    recovery.TaskRecoveryError, "Invalid API Key"
+                ) as caught:
+                    await self.generate()
+                self.assertEqual(len(self.queries), queries + 1)
+                self.assertIn("response:", str(caught.exception))
+                record = json.loads(self.records()[0].read_text())
+                self.assertEqual(record["state"], "pending")
+                self.assertEqual(self.created, ["task-1"])
+        self.functions["_request_json"].side_effect = self.request
+        self.assertTrue((await self.generate()).exists())
+        self.assertEqual(self.created, ["task-1"])
+
+    async def test_removed_model_can_reuse_downloaded_video(self):
+        path = await self.generate()
+        self.functions["VIDEO_SUPPLIER_CATALOG"] = {}
+        self.assertEqual(await self.generate(), path)
+        self.assertEqual(self.created, ["task-1"])
+
     async def test_missing_task_is_not_silently_replaced(self):
         self.query_errors = [recovery.VideoHTTPError(404)]
         with self.assertRaisesRegex(recovery.TaskRecoveryError, "Regenerate"):
             await self.generate()
-        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Regenerate"):
+        with self.assertRaisesRegex(recovery.TaskRecoveryError, "Generate new video"):
             await self.generate()
         self.assertEqual(self.created, ["task-1"])
 
@@ -597,6 +688,30 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RecoveryIdentityTests(unittest.TestCase):
+    def test_escaped_diagnostics_fit_record_and_keep_original_task_identity(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            recovery.TaskJournal(Path(directory), "scope", "key", {}, 0) as journal,
+        ):
+            key = journal.idempotency_key
+            for field, state in [
+                ("creation_error", "creating"),
+                ("task_error", "failed"),
+            ]:
+                fields = {
+                    "query_url": "https://example.com/task-1",
+                    field: "Original failure\n" + '\\"\n' * 4096,
+                }
+                if state == "failed":
+                    fields["task_id"] = "task-1"
+                journal.save(state, **fields)
+                self.assertLessEqual(journal.path.stat().st_size, 16384)
+                record = journal.load()
+                self.assertEqual(record["state"], state)
+                self.assertEqual(record["idempotency_key"], key)
+                self.assertTrue(record[field].startswith("Original failure\n"))
+                self.assertTrue(record[field].endswith("[truncated]"))
+
     def test_idempotency_identity_is_stable_and_preserves_legacy_records(self):
         with tempfile.TemporaryDirectory() as directory:
             options = (
@@ -744,6 +859,44 @@ class RecoveryIdentityTests(unittest.TestCase):
 
 
 class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
+    def test_multimodal_prompt_text_is_preserved_without_request_context(self):
+        functions = load_node_functions("_redact_response")
+        response = {
+            "request": {"content": [{"type": "text", "text": "private prompt"}]}
+        }
+        redacted = functions["_redact_response"](response, [])
+        self.assertEqual(redacted["request"]["content"][0]["text"], "private prompt")
+        self.assertEqual(response["request"]["content"][0]["text"], "private prompt")
+
+    async def test_signed_urls_are_redacted_in_logs_without_changing_response(self):
+        functions = load_node_functions("_request_json", "_request_error_details")
+        url = "https://storage.example/video.mp4?X-Amz-Signature=secret-sign&X-Amz-Credential=secret-credential&token=secret-token&expires=12345"
+        body = {"code": "success", "data": {"status": "SUCCESS", "result_url": url}}
+
+        @asynccontextmanager
+        async def request(*_args, **_kwargs):
+            yield types.SimpleNamespace(
+                status=200, text=AsyncMock(return_value=json.dumps(body))
+            )
+
+        with self.assertLogs("benpay_test.nodes", level="INFO") as logged:
+            result = await functions["_request_json"](
+                types.SimpleNamespace(request=request),
+                "GET",
+                "https://example.com/task-1",
+                {},
+            )
+        self.assertEqual(result["data"]["result_url"], url)
+        details = functions["_request_error_details"](
+            f"Failed at {url}", "key-1", {}, body, {}
+        )
+        for output in ["\n".join(logged.output), details]:
+            self.assertIn(
+                "https://storage.example/video.mp4?X-Amz-Signature=[redacted]", output
+            )
+            for secret in ["secret-sign", "secret-credential", "secret-token", "12345"]:
+                self.assertNotIn(secret, output)
+
     async def test_successful_response_json_is_logged_with_nested_errors_and_redaction(
         self,
     ):
@@ -779,10 +932,10 @@ class RequestPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"taskId": "task-123"', output)
         self.assertIn('"code": "upstream_error"', output)
         self.assertIn("HTTP 200", output)
+        self.assertIn('"prompt": "private prompt"', output)
         for secret in (
             "private-key",
             "private-secret",
-            "private prompt",
             "private-media",
             "private-query-token",
         ):

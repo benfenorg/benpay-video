@@ -39,6 +39,7 @@
     "provider_minimax": "MiniMax",
     "regenerate": "產生新影片",
     "regenerateConfirm": "下次執行時建立新影片？可能產生額外費用。",
-    "regenerateReady": "已準備產生新影片 — 請點擊執行"
+    "regenerateReady": "已準備產生新影片 — 請點擊執行",
+    "controlAfterGenerate": "生成後控制"
   }
 }

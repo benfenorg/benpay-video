@@ -39,6 +39,7 @@
     "provider_minimax": "MiniMax",
     "regenerate": "生成新视频",
     "regenerateConfirm": "下次运行时创建新视频？可能产生额外费用。",
-    "regenerateReady": "已准备生成新视频 — 请点击运行"
+    "regenerateReady": "已准备生成新视频 — 请点击运行",
+    "controlAfterGenerate": "生成后控制"
   }
 }

@@ -16,6 +16,7 @@ function createNode(image = true) {
       { name: "ratio", value: "9:16", options: {} },
       { name: "generation", value: 0 },
       { name: "resolution", value: "720p", options: {} },
+      { name: "seed", value: 42, options: {} },
     ],
     setDirtyCanvas() {},
     addWidget(type, name, value, callback) {
@@ -53,6 +54,26 @@ test("text-to-video exposes the six documented ratios", () => {
   bindVideoControls(node);
   assert.deepEqual(node.widgets[1].options.values, ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"]);
   assert.equal(node.widgets[1].disabled, false);
+});
+
+test("both nodes use the same seed range across providers", () => {
+  for (const image of [false, true]) {
+    const node = createNode(image);
+    bindVideoControls(node);
+    const seed = node.widgets.find((widget) => widget.name === "seed");
+    const protocol = node.widgets[0];
+    assert.equal(seed.options.min, -1);
+    assert.equal(seed.options.max, 2147483647);
+    protocol.value = "minimax";
+    protocol.callback("minimax");
+    assert.equal(seed.options.min, -1);
+    assert.equal(seed.options.max, 2147483647);
+    node.onConfigure();
+    assert.equal(seed.value, 42);
+    protocol.value = "doubao";
+    protocol.callback("doubao");
+    assert.equal(seed.options.max, 2147483647);
+  }
 });
 
 test("both nodes use documented MiniMax resolutions when switching providers", () => {

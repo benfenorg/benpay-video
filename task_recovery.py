@@ -1,4 +1,4 @@
-"""Persist video task identities without request bodies or API key values."""
+"""Persist video task identities and error diagnostics without credentials or media."""
 
 import hashlib
 import json
@@ -23,6 +23,23 @@ class VideoHTTPError(RuntimeError):
 def fingerprint(value: object) -> str:
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _bounded_diagnostic(value: str) -> str:
+    """Budget for JSON escaping as well as UTF-8 when storing error details."""
+    limit = 8192
+    if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) <= limit:
+        return value
+    suffix = "\n[truncated]"
+    lower, upper = 0, len(value)
+    while lower < upper:
+        middle = (lower + upper + 1) // 2
+        candidate = value[:middle] + suffix
+        if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) <= limit:
+            lower = middle
+        else:
+            upper = middle - 1
+    return value[:lower] + suffix
 
 
 def node_recovery_scope(hidden: object) -> str:
@@ -162,6 +179,8 @@ class TaskJournal:
             raise TaskRecoveryError("Invalid recovered output filename.")
         if "creation_error" in value and not isinstance(value["creation_error"], str):
             raise TaskRecoveryError("Invalid recovered creation error.")
+        if "task_error" in value and not isinstance(value["task_error"], str):
+            raise TaskRecoveryError("Invalid recovered task error.")
         return value
 
     def save(self, state: str, **fields: str) -> dict:
@@ -171,12 +190,18 @@ class TaskJournal:
             "output_file",
             "status",
             "creation_error",
+            "task_error",
         }:
             raise TaskRecoveryError("Unexpected task recovery fields.")
         value = {**self.identity, "state": state, **fields}
+        for name in ("creation_error", "task_error"):
+            if name in value:
+                value[name] = _bounded_diagnostic(value[name])
         if self.idempotency_key is not None:
             value["idempotency_key"] = self.idempotency_key
-        payload = (json.dumps(value, indent=2) + "\n").encode("utf-8")
+        payload = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode(
+            "utf-8"
+        )
         if len(payload) > 16384:
             raise TaskRecoveryError("Task recovery record is too large.")
         if not self.persistent:

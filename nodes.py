@@ -192,7 +192,6 @@ def _redact_response(value: object, secrets: list[str]) -> object:
             "sign",
             "signature",
             "csrftoken",
-            "prompt",
             "images",
             "referencevideos",
         }
@@ -210,6 +209,15 @@ def _redact_response(value: object, secrets: list[str]) -> object:
         for secret in secrets:
             if secret:
                 value = value.replace(secret, "[redacted]")
+        # Signed media URLs are credentials too. Keep their path and parameter
+        # names for diagnostics, but never log or persist query values.
+        value = re.sub(
+            r"https?://[^\s\"'<>]+",
+            lambda match: re.sub(
+                r"([?&][^=&#\s]+)=([^&#\s]*)", r"\1=[redacted]", match.group()
+            ),
+            value,
+        )
         return re.sub(r"(?i)Bearer\s+[^\s\"'<>]+", "Bearer [redacted]", value)
     return value
 
@@ -224,13 +232,6 @@ def _log_api_response(
 ) -> None:
     authorization = (headers or {}).get("Authorization", "")
     secrets = [authorization, authorization.removeprefix("Bearer ")]
-    request = request or {}
-    prompt = request.get("prompt")
-    if isinstance(prompt, str):
-        secrets.append(prompt)
-    for item in request.get("content", []):
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            secrets.append(item["text"])
     parsed = urlparse(url)
     LOGGER.info(
         "[BenPay] %s %s%s response: HTTP %s JSON=%s",
@@ -535,6 +536,13 @@ def _reference_video_urls(value: str) -> list[str]:
     return urls
 
 
+def _validate_seed(protocol: str, seed: int) -> bool | str:
+    minimum, maximum = -1, 2147483647
+    if type(seed) is not int or not minimum <= seed <= maximum:
+        return f"{protocol} seed must be an integer from {minimum} to {maximum}."
+    return True
+
+
 def _build_request_body(
     protocol: str,
     model: str,
@@ -547,6 +555,9 @@ def _build_request_body(
     images: list[str] | None = None,
     reference_videos: list[str] | None = None,
 ) -> dict:
+    seed_validation = _validate_seed(protocol, seed)
+    if seed_validation is not True:
+        raise ValueError(seed_validation)
     images = (images or []) if image_mode != "text_to_video" else []
     reference_videos = (
         (reference_videos or []) if image_mode == "reference_video" else []
@@ -767,16 +778,11 @@ async def _generate_video(
     return _video_node_output(video_path)
 
 
-def _creation_error_details(
+def _request_error_details(
     reason: str, key: str, body: dict, response: object, headers: dict
 ) -> str:
     authorization = headers.get("Authorization", "")
     secrets = [authorization, authorization.removeprefix("Bearer ")]
-    if isinstance(body.get("prompt"), str):
-        secrets.append(body["prompt"])
-    for item in body.get("content", []):
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            secrets.append(item["text"])
     return "\n".join(
         [
             str(_redact_response(reason, secrets)),
@@ -845,7 +851,7 @@ async def _create_video_task(
                 reason += (
                     f": {error.get('code', 'API error')}: {error.get('message', '')}"
                 )
-        details = _creation_error_details(
+        details = _request_error_details(
             f"{reason} (creation was not confirmed; no automatic retry)",
             journal.idempotency_key,
             body,
@@ -919,7 +925,7 @@ async def _resume_video_task(
     if record["state"] == "creating":
         raise TaskRecoveryError(
             record.get("creation_error")
-            or _creation_error_details(
+            or _request_error_details(
                 "Previous creation unconfirmed; no new request sent.",
                 journal.idempotency_key or "not recorded",
                 request_body or {},
@@ -929,9 +935,12 @@ async def _resume_video_task(
         )
     task_id = record["task_id"]
     query_url = _normalise_base_url(record["query_url"])
-    if record["state"] == "failed":
+    if record["state"] == "failed" and (
+        record.get("task_error") or record.get("status") == "missing"
+    ):
         raise TaskRecoveryError(
-            f"Task {task_id} has ended. Choose Regenerate to start another task."
+            record.get("task_error")
+            or f"Task {task_id} has ended. Choose Generate new video to start another task."
         )
     output_file = record.get("output_file", "")
     if output_file and Path(output_file).name == output_file:
@@ -957,11 +966,48 @@ async def _resume_video_task(
             raise
         task = _task_payload(response)
         status = str(task.get("status", "")).strip().lower()
-        if status in TERMINAL_FAILURE_STATES:
-            journal.save("failed", task_id=task_id, query_url=query_url, status=status)
+        error = response.get("error")
+        code = response.get("code")
+        if status not in TERMINAL_FAILURE_STATES and (
+            error or code not in (None, 0, "0", 200, "200", "success", "ok")
+        ):
+            if isinstance(error, dict):
+                reason = f"{error.get('code', 'API error')}: {error.get('message', 'Task query failed.')}"
+            else:
+                reason = f"{code or 'API error'}: {error or response.get('message') or response.get('msg') or 'Task query failed.'}"
             raise TaskRecoveryError(
-                f"Task {task_id} ended with status '{status}'. Choose Regenerate to start another."
+                _request_error_details(
+                    reason,
+                    journal.idempotency_key or "not recorded",
+                    request_body or {},
+                    response,
+                    headers,
+                )
             )
+        if status in TERMINAL_FAILURE_STATES:
+            error = task.get("error")
+            reason = task.get("fail_reason")
+            if not reason and isinstance(error, dict):
+                reason = (
+                    f"{error.get('code', 'API error')}: {error.get('message', status)}"
+                )
+            details = _request_error_details(
+                f"{reason or status} (task {task_id}; choose Generate new video to start another)",
+                journal.idempotency_key or "not recorded",
+                request_body or {},
+                response,
+                headers,
+            )
+            journal.save(
+                "failed",
+                task_id=task_id,
+                query_url=query_url,
+                status=status,
+                task_error=details.encode("utf-8")[:8192].decode(
+                    "utf-8", errors="ignore"
+                ),
+            )
+            raise TaskRecoveryError(details)
         if status in {"succeeded", "success", "completed"}:
             journal.save("succeeded", task_id=task_id, query_url=query_url)
             video_url = _video_url_from_payload(task)
@@ -995,6 +1041,15 @@ def _video_node_output(video_path: Path) -> IO.NodeOutput:
 
 
 class BenpayVideo(IO.ComfyNode):
+    @classmethod
+    def validate_inputs(cls, protocol: str, model: str, seed: int) -> bool | str:
+        # Discovery is advisory: removed models must still reach task recovery.
+        if not isinstance(protocol, str) or not protocol.strip():
+            return "Provider must be a non-empty string."
+        if not isinstance(model, str):
+            return "Model must be a string."
+        return _validate_seed(protocol, seed)
+
     @classmethod
     def fingerprint_inputs(cls, **_kwargs) -> float:
         # Always check local credentials/files; TaskJournal handles safe reuse.
@@ -1063,8 +1118,8 @@ class BenpayVideo(IO.ComfyNode):
                 IO.Int.Input(
                     "seed",
                     default=42,
-                    min=0,
-                    max=0x7FFFFFFFFFFFFFFF,
+                    min=-1,
+                    max=2147483647,
                     control_after_generate=True,
                     tooltip="Random seed sent to the selected video protocol.",
                 ),
@@ -1107,6 +1162,14 @@ class BenpayVideo(IO.ComfyNode):
 
 
 class BenpayVideoFromImages(IO.ComfyNode):
+    @classmethod
+    def validate_inputs(cls, protocol: str, model: str, seed: int) -> bool | str:
+        if not isinstance(protocol, str) or not protocol.strip():
+            return "Provider must be a non-empty string."
+        if not isinstance(model, str):
+            return "Model must be a string."
+        return _validate_seed(protocol, seed)
+
     @classmethod
     def fingerprint_inputs(cls, **_kwargs) -> float:
         # Always check local credentials/files; TaskJournal handles safe reuse.
@@ -1191,8 +1254,8 @@ class BenpayVideoFromImages(IO.ComfyNode):
                 IO.Int.Input(
                     "seed",
                     default=42,
-                    min=0,
-                    max=0x7FFFFFFFFFFFFFFF,
+                    min=-1,
+                    max=2147483647,
                     control_after_generate=True,
                     tooltip="Random seed sent to the selected video protocol.",
                 ),

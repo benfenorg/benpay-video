@@ -10,16 +10,21 @@ const { bindVideoControls } = await import(
 const source = (await readFile(new URL("../web/configuration.js", import.meta.url), "utf8"))
   .replace(/^import[\s\S]*?;\n/gm, "");
 let extension;
+const listeners = new Map();
 new Function(
-  "app", "api", "bindVideoControls", "bindModelSelection", "loadTranslations", "t",
+  "app", "api", "bindVideoControls", "bindModelSelection", "loadTranslations", "t", "onLanguageChange",
   source,
 )(
   { registerExtension(value) { extension = value; } },
-  { fetchApi: async () => ({ ok: true, json: async () => ({ configured: true, suffix: "abcd" }) }) },
+  {
+    fetchApi: async () => ({ ok: true, json: async () => ({ configured: true, suffix: "abcd" }) }),
+    addEventListener(name, callback) { listeners.set(name, callback); },
+  },
   bindVideoControls,
   async () => {},
   async () => {},
   (key) => key,
+  () => {},
 );
 
 function createNode() {
@@ -65,4 +70,31 @@ test("configuration status and both buttons opt out of old and new serialization
   }
   node.onRemoved();
   restored.onRemoved();
+});
+
+test("new generation readiness clears when that node starts, including runs that fail", async () => {
+  await extension.setup();
+  const node = createNode();
+  node.id = 7;
+  await extension.nodeCreated(node);
+  const generation = node.widgets.find((widget) => widget.name === "generation");
+  const button = node.widgets.find((widget) => widget.name === "regenerate");
+  const previousWindow = globalThis.window;
+  try {
+    globalThis.window = { confirm: () => true };
+    button.callback();
+    assert.equal(button.readyForGeneration, true);
+    listeners.get("executing")({ detail: { node: "8" } });
+    assert.equal(button.readyForGeneration, true);
+    listeners.get("executing")({ detail: { node: "7", display_node: "7" } });
+    assert.equal(button.readyForGeneration, false);
+    assert.equal(button.name, "regenerate");
+    assert.equal(generation.value, 1);
+    assert.equal(generation.hidden, true);
+    assert.equal(generation.options.hidden, true);
+    assert.equal(node.widgets[0].options.getOptionLabel, undefined);
+  } finally {
+    globalThis.window = previousWindow;
+    node.onRemoved();
+  }
 });
