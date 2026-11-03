@@ -30,6 +30,6 @@ Repository = "https://github.com/benfenorg/benpay-video"
 [tool.comfy]
 PublisherId = "fleet24"
 DisplayName = "BenPay-Video"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/benfenorg/benpay-video/main/assets/icon.png"
 includes = []
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
