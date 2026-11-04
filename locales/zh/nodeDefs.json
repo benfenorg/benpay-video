@@ -44,7 +44,7 @@
   },
   "BenpayVideoFromImages": {
     "display_name": "BenPay 图生视频",
-    "description": "使用 BenPay 将图片或参考视频生成视频。",
+    "description": "使用 BenPay 将图片生成视频。",
     "inputs": {
       "protocol": {
         "name": "视频服务",
@@ -76,19 +76,19 @@
       },
       "image_mode": {
         "name": "图片模式",
-        "tooltip": "选择首帧、首尾帧、参考图片或参考视频（仅豆包）。"
+        "tooltip": "选择首帧、首尾帧或参考图片。"
       },
       "images": {
-        "name": "图片",
-        "tooltip": "参考图片：豆包 1-4 张，MiniMax 1-5 张；首帧和首尾帧模式分别需要 1 张和 2 张图片。"
-      },
-      "reference_video_urls": {
-        "name": "参考视频地址",
-        "tooltip": "仅豆包支持，最多输入 4 个 HTTPS 参考视频地址，每行一个。"
+        "name": "首帧 / 参考图片",
+        "tooltip": "连接一张首帧图片，或一批参考图片。"
       },
       "generation": {
         "name": "生成批次",
         "tooltip": "保持不变以恢复原任务；点击“重新生成”可在下次运行时创建新视频。"
+      },
+      "last_frame": {
+        "name": "尾帧",
+        "tooltip": "仅首尾帧模式需要，连接一张尾帧图片。"
       }
     },
     "outputs": {

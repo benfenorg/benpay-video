@@ -4,7 +4,7 @@ Generate videos from text or images directly in ComfyUI with BenPay.
 
 ## Features
 
-- Create videos from text prompts, images, or reference videos.
+- Create videos from text prompts or images.
 - Choose a video model and adjust resolution, duration, and aspect ratio.
 - Preview and save generated videos in ComfyUI.
 - Get started with ready-to-use example workflows.
@@ -45,8 +45,18 @@ Save your workflow to keep task recovery available after reloading.
 Creating a new task may incur another charge even if an earlier task is running.
 MiniMax image-to-video uses the **adaptive** aspect ratio; text-to-video supports
 16:9, 9:16, 4:3, 3:4, 1:1 and 21:9.
+For first-and-last-frame mode, upload one image in each of the automatically
+connected **Load First Frame** and **Load Last Frame** nodes, then run.
+Switching **Image mode** automatically connects the matching upload nodes.
+Reference-image mode shows 4 optional uploads for Doubao or 5 for MiniMax and one
+**Batch Reference Images** node. Empty uploads are skipped automatically; upload
+at least one image. No add-image button is needed.
+Switching modes saves the inactive layout inside the workflow and restores its
+uploaded images and connections when you switch back. Shared nodes used by other
+branches remain on the canvas.
+Existing user-connected image processing chains are preserved. Automatic layout
+management only applies to helpers created by BenPay or its bundled example.
 Reference-image mode accepts 1–4 images for Doubao and 1–5 for MiniMax.
-Reference-video mode is available for Doubao only, with at most 4 reference videos.
 
 For programmatic use, see [API task recovery](docs/api-task-recovery.md).
 

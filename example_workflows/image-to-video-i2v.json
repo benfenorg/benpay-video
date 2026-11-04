@@ -34,7 +34,8 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "LoadImage"
+        "Node name for S&R": "LoadImage",
+        "benpayImageInput": true
       },
       "widgets_values": [
         "",
@@ -60,6 +61,11 @@
           "name": "images",
           "type": "IMAGE",
           "link": 2
+        },
+        {
+          "name": "last_frame",
+          "type": "IMAGE",
+          "link": null
         }
       ],
       "outputs": [
@@ -77,7 +83,6 @@
         "doubao",
         "doubao-seedance-2.0",
         "first_frame",
-        "",
         "保持图片中主体的外观与构图，让主体产生自然、细腻的运动，镜头缓缓推进。",
         "720p",
         5,

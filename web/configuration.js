@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { bindModelSelection } from "./models.js";
-import { bindVideoControls } from "./video_controls.js";
+import { bindVideoControls, migrateImageWorkflow } from "./video_controls.js";
 import {
   currentLocale,
   loadTranslations,
@@ -53,7 +53,6 @@ function localizeNodeOptions(node) {
         "first_frame",
         "first_last_frame",
         "reference_images",
-        "reference_video",
       ],
     },
   };
@@ -249,6 +248,9 @@ function openKeyDialog() {
 
 app.registerExtension({
   name: "BenPay.ConfigurationStatus",
+  beforeConfigureGraph(graphData) {
+    for (const node of graphData.nodes || []) migrateImageWorkflow(node);
+  },
   async setup() {
     await loadTranslations();
     checkConfigurationBeforeQueueing();

@@ -44,7 +44,7 @@
   },
   "BenpayVideoFromImages": {
     "display_name": "BenPay 圖片生成影片",
-    "description": "使用 BenPay 將圖片或參考影片轉為影片。",
+    "description": "使用 BenPay 將圖片轉為影片。",
     "inputs": {
       "protocol": {
         "name": "影片服務",
@@ -76,19 +76,19 @@
       },
       "image_mode": {
         "name": "圖片模式",
-        "tooltip": "選擇首幀、首尾幀、參考圖片或參考影片（僅豆包）。"
+        "tooltip": "選擇首幀、首尾幀或參考圖片。"
       },
       "images": {
-        "name": "圖片",
-        "tooltip": "參考圖片：豆包 1-4 張，MiniMax 1-5 張；首幀和首尾幀模式分別需要 1 張和 2 張圖片。"
-      },
-      "reference_video_urls": {
-        "name": "參考影片網址",
-        "tooltip": "僅豆包支援，最多輸入 4 個 HTTPS 參考影片網址，每行一個。"
+        "name": "首幀 / 參考圖片",
+        "tooltip": "連接一張首幀圖片，或一批參考圖片。"
       },
       "generation": {
         "name": "生成批次",
         "tooltip": "保持不變以恢復原任務；點選「重新生成」可在下次執行時建立新影片。"
+      },
+      "last_frame": {
+        "name": "尾幀",
+        "tooltip": "僅首尾幀模式需要，連接一張尾幀圖片。"
       }
     },
     "outputs": {

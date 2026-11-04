@@ -49,7 +49,7 @@ TERMINAL_FAILURE_STATES = {
     "expired",
 }
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
-IMAGE_MODES = ["first_frame", "first_last_frame", "reference_images", "reference_video"]
+IMAGE_MODES = ["first_frame", "first_last_frame", "reference_images"]
 VIDEO_RESOLUTION_OPTIONS = ["480p", "720p", "1080p", "480P", "768P"]
 DEFAULT_VIDEO_RESOLUTION = "720p"
 
@@ -542,17 +542,6 @@ def _image_to_data_url(image) -> str:
     return f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
 
 
-def _reference_video_urls(value: str) -> list[str]:
-    urls = [line.strip() for line in (value or "").splitlines() if line.strip()]
-    for video_url in urls:
-        parsed = urlparse(video_url)
-        if video_url.startswith("data:"):
-            continue
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise ValueError("Reference video URLs must use HTTPS or a data URL.")
-    return urls
-
-
 def _validate_seed(protocol: str, seed: int) -> bool | str:
     minimum, maximum = -1, 2147483647
     if type(seed) is not int or not minimum <= seed <= maximum:
@@ -570,15 +559,18 @@ def _build_request_body(
     seed: int,
     image_mode: str = "text_to_video",
     images: list[str] | None = None,
-    reference_videos: list[str] | None = None,
 ) -> dict:
     seed_validation = _validate_seed(protocol, seed)
     if seed_validation is not True:
         raise ValueError(seed_validation)
     images = (images or []) if image_mode != "text_to_video" else []
-    reference_videos = (
-        (reference_videos or []) if image_mode == "reference_video" else []
-    )
+    if image_mode not in {
+        "text_to_video",
+        "first_frame",
+        "first_last_frame",
+        "reference_images",
+    }:
+        raise ValueError("Unsupported image mode.")
     if protocol == "doubao":
         resolution = resolution.lower()
         if resolution not in {"480p", "720p", "1080p"}:
@@ -587,8 +579,6 @@ def _build_request_body(
         resolution = resolution.upper()
         if resolution not in {"768P", "480P"}:
             raise ValueError("MiniMax resolution must be 768P or 480P.")
-        if image_mode == "reference_video":
-            raise ValueError("MiniMax does not support reference_video mode.")
         allowed_ratios = (
             {"16:9", "9:16", "4:3", "3:4", "1:1", "21:9"}
             if image_mode == "text_to_video"
@@ -612,10 +602,6 @@ def _build_request_body(
         raise ValueError(
             f"{protocol} reference_images mode requires 1 to {max_reference_images} images."
         )
-    if image_mode == "reference_video" and not reference_videos:
-        raise ValueError("reference_video mode requires at least one video URL.")
-    if protocol == "doubao" and len(reference_videos) > 4:
-        raise ValueError("Doubao supports at most 4 reference videos.")
 
     if protocol == "doubao":
         metadata = {
@@ -630,7 +616,6 @@ def _build_request_body(
                 "first_frame": "i2v_first_frame",
                 "first_last_frame": "i2v_first_last_frame",
                 "reference_images": "multi_ref",
-                "reference_video": "multi_ref_vid",
             }[image_mode],
         }
         body = {
@@ -639,8 +624,8 @@ def _build_request_body(
             "images": images,
             "metadata": metadata,
         }
-        if reference_videos or image_mode == "text_to_video":
-            body["reference_videos"] = reference_videos
+        if image_mode == "text_to_video":
+            body["reference_videos"] = []
         return body
 
     if protocol == "minimax":
@@ -738,9 +723,9 @@ async def _generate_video(
     seed: int,
     image_mode: str = "text_to_video",
     images=None,
-    reference_video_urls: str = "",
     recovery_scope: str = "",
     generation: int = 0,
+    last_frame=None,
 ) -> IO.NodeOutput:
     protocol = protocol.strip().lower()
     model = _resolve_model(protocol, model)
@@ -753,6 +738,14 @@ async def _generate_video(
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+    image_urls = _image_data_urls(images) if image_mode != "text_to_video" else []
+    if image_mode == "first_last_frame":
+        last_urls = _image_data_urls(last_frame)
+        if len(image_urls) != 1 or len(last_urls) != 1:
+            raise ValueError(
+                "First and last frames require one image in each image input."
+            )
+        image_urls.extend(last_urls)
     request_body = _build_request_body(
         protocol,
         model,
@@ -762,12 +755,7 @@ async def _generate_video(
         ratio,
         seed,
         image_mode=image_mode,
-        images=_image_data_urls(images) if image_mode != "text_to_video" else [],
-        reference_videos=(
-            _reference_video_urls(reference_video_urls)
-            if protocol == "doubao" and image_mode == "reference_video"
-            else []
-        ),
+        images=image_urls,
     )
     journal = TaskJournal(
         Path(folder_paths.get_user_directory()) / "benpay-video-tasks",
@@ -1226,7 +1214,7 @@ class BenpayVideoFromImages(IO.ComfyNode):
             node_id="BenpayVideoFromImages",
             display_name="BenPay Image to Video",
             category="video/BenPay",
-            description="Create a video from images or reference videos with BenPay.",
+            description="Create a video from images with BenPay.",
             is_output_node=True,
             hidden=[IO.Hidden.unique_id, IO.Hidden.extra_pnginfo],
             inputs=[
@@ -1252,18 +1240,17 @@ class BenpayVideoFromImages(IO.ComfyNode):
                     "image_mode",
                     options=IMAGE_MODES,
                     default="first_frame",
-                    tooltip="Select first frame, first and last frame, reference images, or reference video.",
+                    tooltip="Select first frame, first and last frame, or reference images.",
                 ),
                 IO.Image.Input(
                     "images",
                     optional=True,
-                    tooltip="Connect one image, two ordered frames, or reference images (Doubao: 1-4; MiniMax: 1-5).",
+                    tooltip="Connect the first frame or reference images (Doubao: 1-4; MiniMax: 1-5).",
                 ),
-                IO.String.Input(
-                    "reference_video_urls",
-                    multiline=True,
-                    default="",
-                    tooltip="Doubao only: at most 4 HTTPS reference video URLs, one per line.",
+                IO.Image.Input(
+                    "last_frame",
+                    optional=True,
+                    tooltip="Connect one last-frame image when using First and last frames mode.",
                 ),
                 IO.String.Input(
                     "prompt",
@@ -1322,7 +1309,6 @@ class BenpayVideoFromImages(IO.ComfyNode):
         cls,
         prompt: str,
         images=None,
-        reference_video_urls: str = "",
         image_mode: str = "first_frame",
         protocol: str = DEFAULT_SELECTED_PROTOCOL,
         model: str = "",
@@ -1331,6 +1317,7 @@ class BenpayVideoFromImages(IO.ComfyNode):
         ratio: str = "adaptive",
         seed: int = 42,
         generation: int = 0,
+        last_frame=None,
     ) -> IO.NodeOutput:
         return await _generate_video(
             protocol,
@@ -1342,7 +1329,7 @@ class BenpayVideoFromImages(IO.ComfyNode):
             seed,
             image_mode=image_mode,
             images=images,
-            reference_video_urls=reference_video_urls,
+            last_frame=last_frame,
             recovery_scope=node_recovery_scope(cls.hidden),
             generation=generation,
         )

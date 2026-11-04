@@ -49,7 +49,6 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
             _image_data_urls=lambda value: value or [],
-            _reference_video_urls=lambda value: value.splitlines() if value else [],
             _request_json=AsyncMock(side_effect=self.request),
             _download_video=AsyncMock(side_effect=self.download),
             _video_node_output=lambda path: path,
@@ -445,22 +444,69 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self.generate()
         self.assertEqual(len(self.created), 4)
 
-    async def test_image_contents_and_reference_urls_affect_fingerprint(self):
+    async def test_separate_first_and_last_frames_keep_order_for_both_providers(self):
+        for protocol, resolution in [("doubao", "720p"), ("minimax", "768P")]:
+            with self.subTest(protocol=protocol):
+                await self.generate(
+                    protocol=protocol,
+                    model="MiniMax-H3"
+                    if protocol == "minimax"
+                    else "doubao-seedance-2.0",
+                    resolution=resolution,
+                    ratio="adaptive",
+                    image_mode="first_last_frame",
+                    images=["first-image"],
+                    last_frame=["last-image"],
+                )
+                posts = [
+                    call
+                    for call in self.functions["_request_json"].call_args_list
+                    if call.args[1] == "POST"
+                ]
+                body = posts[-1].args[-1]
+                if protocol == "doubao":
+                    self.assertEqual(body["images"], ["first-image", "last-image"])
+                else:
+                    self.assertEqual(
+                        [item["image_url"]["url"] for item in body["content"][1:]],
+                        ["first-image", "last-image"],
+                    )
+
+    async def test_first_last_mode_requires_one_image_in_each_port_before_request(self):
+        for first, last in [
+            (["first"], None),
+            (None, ["last"]),
+            (["a", "b"], ["last"]),
+            (["first"], ["a", "b"]),
+        ]:
+            with (
+                self.subTest(first=first, last=last),
+                self.assertRaisesRegex(ValueError, "one image in each"),
+            ):
+                await self.generate(
+                    image_mode="first_last_frame", images=first, last_frame=last
+                )
+        self.functions["_request_json"].assert_not_awaited()
+
+    async def test_first_frame_mode_ignores_last_frame_input(self):
+        await self.generate(
+            image_mode="first_frame", images=["first"], last_frame=["unused"]
+        )
+        posts = [
+            call
+            for call in self.functions["_request_json"].call_args_list
+            if call.args[1] == "POST"
+        ]
+        self.assertEqual(posts[-1].args[-1]["images"], ["first"])
+
+    async def test_image_contents_affect_fingerprint(self):
         await self.generate(
             image_mode="first_frame", images=["data:image/png;base64,AAA"]
         )
         await self.generate(
             image_mode="first_frame", images=["data:image/png;base64,BBB"]
         )
-        await self.generate(
-            image_mode="reference_video",
-            reference_video_urls="https://example.com/1.mp4",
-        )
-        await self.generate(
-            image_mode="reference_video",
-            reference_video_urls="https://example.com/2.mp4",
-        )
-        self.assertEqual(len(self.created), 4)
+        self.assertEqual(len(self.created), 2)
         for path in self.records():
             payload = path.read_text()
             self.assertNotIn(self.key, payload)
@@ -737,18 +783,11 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
         for changes in [
             {"protocol": "minimax", "model": "MiniMax-H3", "resolution": "720p"},
             {"image_mode": "reference_images", "images": ["image"] * 5},
-            {
-                "image_mode": "reference_video",
-                "reference_video_urls": "\n".join(
-                    f"https://example.com/{index}.mp4" for index in range(5)
-                ),
-            },
+            {"image_mode": "reference_video"},
             {
                 "protocol": "minimax",
                 "model": "MiniMax-H3",
-                "ratio": "adaptive",
                 "image_mode": "reference_video",
-                "reference_video_urls": "https://example.com/reference.mp4",
             },
         ]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -792,9 +831,6 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unused_materials_are_not_validated_or_sent(self):
         image_converter = self.functions["_image_data_urls"]
-        self.functions["_reference_video_urls"] = load_node_functions(
-            "_reference_video_urls"
-        )["_reference_video_urls"]
         for protocol, model in [
             ("doubao", "doubao-seedance-2.0"),
             ("minimax", "MiniMax-H3"),
@@ -807,14 +843,13 @@ class TaskRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     ratio="adaptive",
                     image_mode="first_frame",
                     images=["image-data"],
-                    reference_video_urls="invalid stale URL",
                 )
                 body = self.functions["_request_json"].call_args_list[-2].args[-1]
                 self.assertNotIn("reference_videos", body)
         self.functions["_image_data_urls"] = unittest.mock.Mock(
             side_effect=ValueError("unused image must not be converted")
         )
-        await self.generate(images=object(), reference_video_urls="invalid stale URL")
+        await self.generate(images=object())
         self.functions["_image_data_urls"].assert_not_called()
         self.functions["_image_data_urls"] = image_converter
 

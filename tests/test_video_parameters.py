@@ -53,37 +53,7 @@ class VideoParameterTests(unittest.TestCase):
                     "minimax", "MiniMax-H3", "prompt", "768P", 5, "16:9", seed
                 )
 
-    def test_doubao_reference_video_limit(self):
-        for count in [4, 5]:
-            videos = [f"https://example.com/{index}.mp4" for index in range(count)]
-            if count == 4:
-                body = build_request_body(
-                    "doubao",
-                    "test-model",
-                    "prompt",
-                    "720p",
-                    5,
-                    "adaptive",
-                    42,
-                    image_mode="reference_video",
-                    reference_videos=videos,
-                )
-                self.assertEqual(body["reference_videos"], videos)
-            else:
-                with self.assertRaisesRegex(ValueError, "at most 4"):
-                    build_request_body(
-                        "doubao",
-                        "test-model",
-                        "prompt",
-                        "720p",
-                        5,
-                        "adaptive",
-                        42,
-                        image_mode="reference_video",
-                        reference_videos=videos,
-                    )
-
-    def test_non_video_modes_do_not_send_stale_reference_videos(self):
+    def test_image_modes_do_not_send_reference_videos(self):
         for protocol in ["doubao", "minimax"]:
             body = build_request_body(
                 protocol,
@@ -95,7 +65,6 @@ class VideoParameterTests(unittest.TestCase):
                 42,
                 image_mode="first_frame",
                 images=["image-data"],
-                reference_videos=["stale-disabled-url"],
             )
             self.assertNotIn("reference_videos", body)
             if protocol == "minimax":
@@ -129,36 +98,6 @@ class VideoParameterTests(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(ValueError, f"1 to {maximum}"):
                             build_request_body(*arguments, **options)
-
-    def test_reference_video_is_supported_only_for_doubao(self):
-        videos = ["https://example.com/reference.mp4"]
-        with self.assertRaisesRegex(
-            ValueError, "MiniMax does not support reference_video"
-        ):
-            build_request_body(
-                "minimax",
-                "MiniMax-H3",
-                "prompt",
-                "768P",
-                5,
-                "adaptive",
-                42,
-                image_mode="reference_video",
-                reference_videos=videos,
-            )
-        body = build_request_body(
-            "doubao",
-            "doubao-seedance-2.0",
-            "prompt",
-            "720p",
-            5,
-            "adaptive",
-            42,
-            image_mode="reference_video",
-            reference_videos=videos,
-        )
-        self.assertEqual(body["metadata"]["mode"], "multi_ref_vid")
-        self.assertEqual(body["reference_videos"], videos)
 
     def test_minimax_image_modes_require_adaptive_without_silent_rewrite(self):
         for mode, images in [
@@ -282,3 +221,22 @@ class VideoParameterTests(unittest.TestCase):
             build_request_body(
                 "doubao", "test-model", "prompt", "custom-resolution", 5, "16:9", 42
             )
+
+
+class RemovedVideoModeTests(unittest.TestCase):
+    def test_reference_video_mode_is_rejected_for_both_providers(self):
+        for protocol, resolution in [("doubao", "720p"), ("minimax", "768P")]:
+            with (
+                self.subTest(protocol=protocol),
+                self.assertRaisesRegex(ValueError, "Unsupported image mode"),
+            ):
+                build_request_body(
+                    protocol,
+                    "model",
+                    "prompt",
+                    resolution,
+                    5,
+                    "adaptive",
+                    42,
+                    image_mode="reference_video",
+                )

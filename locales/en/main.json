@@ -34,7 +34,6 @@
     "mode_first_frame": "First frame",
     "mode_first_last_frame": "First and last frames",
     "mode_reference_images": "Reference images",
-    "mode_reference_video": "Reference video",
     "provider_doubao": "Doubao",
     "provider_minimax": "MiniMax",
     "regenerate": "Generate new video",

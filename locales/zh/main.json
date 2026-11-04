@@ -34,7 +34,6 @@
     "mode_first_frame": "首帧",
     "mode_first_last_frame": "首尾帧",
     "mode_reference_images": "参考图片",
-    "mode_reference_video": "参考视频",
     "provider_doubao": "豆包",
     "provider_minimax": "MiniMax",
     "regenerate": "生成新视频",

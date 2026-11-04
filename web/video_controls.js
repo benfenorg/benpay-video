@@ -2,6 +2,24 @@ import { t } from "./i18n.js";
 
 const fixedRatios = ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"];
 
+export function migrateImageWorkflow(nodeData) {
+  if (nodeData.type !== "BenpayVideoFromImages") return;
+  const values = nodeData.widgets_values;
+  if (!Array.isArray(values)) return;
+  // Workflows saved before removing reference_video_urls have an extra string
+  // before the prompt. Migrate before LiteGraph assigns widgets by position.
+  if (
+    values.length >= 11 &&
+    typeof values[3] === "string" &&
+    typeof values[4] === "string" &&
+    /^(480p|720p|1080p|768p)$/i.test(values[5]) &&
+    typeof values[6] === "number" &&
+    [...fixedRatios, "adaptive"].includes(values[7])
+  ) {
+    values.splice(3, 1);
+  }
+}
+
 export function bindVideoControls(node) {
   const widget = (name) => node.widgets.find((item) => item.name === name);
   const protocol = widget("protocol");
@@ -10,7 +28,6 @@ export function bindVideoControls(node) {
   const seed = widget("seed");
   const generation = widget("generation");
   const imageMode = widget("image_mode");
-  const referenceVideos = widget("reference_video_urls");
   const imageNode = Boolean(imageMode);
   let regenerateButton = null;
 
@@ -47,14 +64,12 @@ export function bindVideoControls(node) {
     }
     if (imageMode) {
       const modes = ["first_frame", "first_last_frame", "reference_images"];
-      if (protocol.value !== "minimax") modes.push("reference_video");
       imageMode.options.values = modes;
       if (!modes.includes(imageMode.value)) {
         imageMode.value = "first_frame";
         imageMode.callback?.(imageMode.value);
       }
     }
-    if (referenceVideos) referenceVideos.disabled = protocol.value === "minimax";
     const adaptiveOnly = imageNode && protocol.value === "minimax";
     const values = adaptiveOnly
       ? ["adaptive"]

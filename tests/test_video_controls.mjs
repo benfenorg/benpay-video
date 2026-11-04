@@ -4,7 +4,7 @@ import test from "node:test";
 
 const source = await readFile(new URL("../web/video_controls.js", import.meta.url), "utf8");
 const isolated = source.replace('import { t } from "./i18n.js";', "const t = (key) => key;");
-const { bindVideoControls } = await import(
+const { bindVideoControls, migrateImageWorkflow } = await import(
   `data:text/javascript;base64,${Buffer.from(isolated).toString("base64")}`
 );
 
@@ -27,7 +27,6 @@ function createNode(image = true) {
   };
   if (image) {
     node.widgets.push({ name: "image_mode", value: "first_frame", options: {} });
-    node.widgets.push({ name: "reference_video_urls", value: "https://example.com/ref.mp4" });
   }
   return node;
 }
@@ -127,23 +126,15 @@ test("both Doubao nodes replace obsolete 768p on load and after provider changes
   }
 });
 
-test("switching to MiniMax removes reference video mode and disables its URLs", () => {
+test("both providers offer image modes only", () => {
   const node = createNode();
-  const mode = node.widgets.find((widget) => widget.name === "image_mode");
-  const urls = node.widgets.find((widget) => widget.name === "reference_video_urls");
-  mode.value = "reference_video";
   bindVideoControls(node);
-  assert.ok(mode.options.values.includes("reference_video"));
-  node.widgets[0].value = "minimax";
-  node.widgets[0].callback("minimax");
-  assert.deepEqual(mode.options.values, ["first_frame", "first_last_frame", "reference_images"]);
-  assert.equal(mode.value, "first_frame");
-  assert.equal(urls.disabled, true);
-  assert.equal(urls.value, "https://example.com/ref.mp4");
-  node.widgets[0].value = "doubao";
-  node.widgets[0].callback("doubao");
-  assert.ok(mode.options.values.includes("reference_video"));
-  assert.equal(urls.disabled, false);
+  const mode = node.widgets.find((widget) => widget.name === "image_mode");
+  for (const provider of ["doubao", "minimax", "doubao"]) {
+    node.widgets[0].value = provider;
+    node.widgets[0].callback(provider);
+    assert.deepEqual(mode.options.values, ["first_frame", "first_last_frame", "reference_images"]);
+  }
 });
 
 test("loading a MiniMax workflow normalizes obsolete reference video mode", () => {
@@ -214,4 +205,22 @@ test("node initialization works without secure-context randomUUID", () => {
   } finally {
     Object.defineProperty(globalThis, "crypto", original);
   }
+});
+
+
+test("old image workflows migrate before widget assignment without losing parameters", () => {
+  const legacy = {
+    type: "BenpayVideoFromImages",
+    widgets_values: ["doubao", "model", "first_frame", "", "cat prompt", "720p", 5, "adaptive", 44, "fixed", 2],
+  };
+  migrateImageWorkflow(legacy);
+  assert.deepEqual(legacy.widgets_values, ["doubao", "model", "first_frame", "cat prompt", "720p", 5, "adaptive", 44, "fixed", 2]);
+  migrateImageWorkflow(legacy);
+  assert.equal(legacy.widgets_values.length, 10);
+  const current = { type: "BenpayVideoFromImages", widgets_values: [...legacy.widgets_values] };
+  migrateImageWorkflow(current);
+  assert.deepEqual(current.widgets_values, legacy.widgets_values);
+  const text = { type: "BenpayVideo", widgets_values: ["unchanged"] };
+  migrateImageWorkflow(text);
+  assert.deepEqual(text.widgets_values, ["unchanged"]);
 });
