@@ -95,13 +95,25 @@ test("cancelling Run configuration prevents submission and another Run can promp
   controls(plugin).cancel.events.click();
   for (let attempt = 0; attempt < 2; attempt++) {
     const running = plugin.run();
-    const rejected = assert.rejects(running, /keyMissing/);
     await new Promise((resolve) => setImmediate(resolve));
     controls(plugin).cancel.events.click();
-    await rejected;
+    assert.deepEqual(await running, { node_errors: {} });
   }
   assert.equal(plugin.shown, 3);
   assert.equal(plugin.queued.length, 0);
+});
+
+test("Escape and dialog close cancel Run without rejecting or submitting", async () => {
+  for (const eventName of ["cancel", "close"]) {
+    const plugin = loadPlugin();
+    await plugin.extension.setup();
+    controls(plugin).cancel.events.click();
+    const running = plugin.run();
+    await new Promise((resolve) => setImmediate(resolve));
+    plugin.dialogs.at(-1).events[eventName]({ preventDefault() {} });
+    assert.deepEqual(await running, { node_errors: {} });
+    assert.equal(plugin.queued.length, 0);
+  }
 });
 
 test("workflows without BenPay nodes submit without a configuration check", async () => {
@@ -128,11 +140,10 @@ test("partial execution ignores unrelated BenPay nodes and follows upstream depe
   assert.equal(plugin.requests.length, checks);
   assert.equal(plugin.queued.length, 1);
   const running = plugin.run(output, { partialExecutionTargets: ["4"] });
-  const rejected = assert.rejects(running, /keyMissing/);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(plugin.shown, 2);
   controls(plugin).cancel.events.click();
-  await rejected;
+  assert.deepEqual(await running, { node_errors: {} });
   assert.equal(plugin.queued.length, 1);
 });
 

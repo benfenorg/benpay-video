@@ -133,7 +133,10 @@ function checkConfigurationBeforeQueueing() {
   api.queuePrompt = async function (number, prompt, ...args) {
     const usesBenPay = usesBenPayNodes(prompt.output || {}, args[0]?.partialExecutionTargets);
     if (usesBenPay && !(await refreshStatus()).configured) {
-      await showKeyDialog();
+      const saved = await showKeyDialog();
+      // A response without prompt_id is handled as an unsubmitted prompt.
+      // Cancellation is a normal user action, not an extension exception.
+      if (!saved) return { node_errors: {} };
       if (!(await refreshStatus()).configured) throw new Error(t("keyMissing"));
     }
     return queuePrompt.call(this, number, prompt, ...args);
@@ -190,7 +193,7 @@ function openKeyDialog() {
     const { dialog, form, input, error, cancel, save } = createDialogElements();
     let saving = false;
     let closed = false;
-    function closeDialog() {
+    function closeDialog(saved = false) {
       if (closed) return;
       closed = true;
       input.value = "";
@@ -198,14 +201,14 @@ function openKeyDialog() {
       dialog.close();
       dialog.remove();
       activeDialog = null;
-      resolve();
+      resolve(saved);
     }
-    cancel.addEventListener("click", closeDialog);
+    cancel.addEventListener("click", () => closeDialog());
     dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
       if (!saving) closeDialog();
     });
-    dialog.addEventListener("close", closeDialog, { once: true });
+    dialog.addEventListener("close", () => closeDialog(), { once: true });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (saving) return;
@@ -232,7 +235,7 @@ function openKeyDialog() {
           return;
         }
         displayStatus(result);
-        closeDialog();
+        closeDialog(true);
       } catch {
         setText(error, "saveUnconfirmed");
       } finally {
