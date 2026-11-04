@@ -4,4 +4,14 @@ __pycache__/
 .DS_Store
 config.json
 .config.json.tmp-*
+.benpay-node.json
+.benpay-node-update.json
+..benpay-node.json.tmp-*
+..benpay-node-update.json.tmp-*
+benpay-video-suppliers.json
+.benpay-catalog-*
 .venv/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
