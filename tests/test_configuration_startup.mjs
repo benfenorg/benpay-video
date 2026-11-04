@@ -37,16 +37,41 @@ function loadPlugin({ configured = false, unavailable = false } = {}) {
       return { ok: true, json: async () => ({ configured, suffix: "abcd" }) };
     },
   };
+  let output;
+  const app = {
+    registerExtension(value) { extension = value; },
+    graph: { _nodes: [] },
+    async graphToPrompt() { throw new Error("Key preflight must not serialize widgets"); },
+    async queuePrompt(number, batchCount = 1, options = {}) {
+      for (let index = 0; index < batchCount; index++) {
+        await api.queuePrompt(number, { output }, options);
+      }
+      return true;
+    },
+  };
   new Function(
     "app", "api", "document", "loadTranslations", "onLanguageChange", "t", "currentLocale",
     source,
   )(
-    { registerExtension(value) { extension = value; } }, api, document,
+    app, api, document,
     async () => {}, () => {}, (key) => key, () => "en",
   );
   return {
     extension, dialogs, requests, queued,
-    run: (output = { 1: { class_type: "BenpayVideo" } }, options = {}) => api.queuePrompt(0, { output }, options),
+    run: (nodes = { 1: { class_type: "BenpayVideo" } }, options = {}, batchCount = 1) => {
+      output = nodes;
+      const graphNodes = new Map(Object.entries(nodes).map(([id, node]) => [id, {
+        id, comfyClass: node.class_type, mode: node.mode,
+        inputs: Object.values(node.inputs || {}).map((value) => ({ value, type: "IMAGE" })),
+        getInputLink(index) {
+          const value = this.inputs[index].value;
+          return Array.isArray(value) ? { origin_id: String(value[0]), origin_slot: value[1] } : null;
+        },
+      }]));
+      app.graph._nodes = [...graphNodes.values()];
+      const targets = options.partialExecutionTargets;
+      return app.queuePrompt(0, batchCount, { queueNodeIds: targets });
+    },
     get shown() { return shown; },
     error: () => listeners.get("execution_error")({ detail: {
       node_type: "BenpayVideo", exception_type: "plugin.ConfigurationError", prompt_id: "run-1",
@@ -83,7 +108,7 @@ test("Run prompts before submission after startup cancellation, saving continues
   const { form, input } = controls(plugin);
   input.value = "test-key";
   await form.events.submit({ preventDefault() {} });
-  assert.deepEqual(await running, { prompt_id: "queued-1" });
+  assert.equal(await running, true);
   assert.equal(plugin.queued.length, 1);
   await plugin.run();
   assert.equal(plugin.shown, 2);
@@ -97,7 +122,7 @@ test("cancelling Run configuration prevents submission and another Run can promp
     const running = plugin.run();
     await new Promise((resolve) => setImmediate(resolve));
     controls(plugin).cancel.events.click();
-    assert.deepEqual(await running, { node_errors: {} });
+    assert.equal(await running, false);
   }
   assert.equal(plugin.shown, 3);
   assert.equal(plugin.queued.length, 0);
@@ -111,7 +136,7 @@ test("Escape and dialog close cancel Run without rejecting or submitting", async
     const running = plugin.run();
     await new Promise((resolve) => setImmediate(resolve));
     plugin.dialogs.at(-1).events[eventName]({ preventDefault() {} });
-    assert.deepEqual(await running, { node_errors: {} });
+    assert.equal(await running, false);
     assert.equal(plugin.queued.length, 0);
   }
 });
@@ -143,7 +168,7 @@ test("partial execution ignores unrelated BenPay nodes and follows upstream depe
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(plugin.shown, 2);
   controls(plugin).cancel.events.click();
-  assert.deepEqual(await running, { node_errors: {} });
+  assert.equal(await running, false);
   assert.equal(plugin.queued.length, 1);
 });
 
@@ -176,4 +201,115 @@ test("a fresh page can prompt again after the previous page was dismissed", asyn
   const next = loadPlugin();
   await next.extension.setup();
   assert.equal(next.shown, 1);
+});
+
+
+test("cancelling a batch stops every submission, saving allows the whole batch", async () => {
+  const plugin = loadPlugin();
+  await plugin.extension.setup();
+  controls(plugin).cancel.events.click();
+  const canceled = plugin.run(undefined, {}, 3);
+  await new Promise((resolve) => setImmediate(resolve));
+  controls(plugin).cancel.events.click();
+  assert.equal(await canceled, false);
+  assert.equal(plugin.shown, 2);
+  assert.equal(plugin.queued.length, 0);
+  const saved = plugin.run(undefined, {}, 3);
+  await new Promise((resolve) => setImmediate(resolve));
+  const { form, input } = controls(plugin);
+  input.value = "test-key";
+  await form.events.submit({ preventDefault() {} });
+  assert.equal(await saved, true);
+  assert.equal(plugin.shown, 3);
+  assert.equal(plugin.queued.length, 3);
+});
+
+test("preflight follows containers, nested outputs and subgraph inputs without serialization", () => {
+  const usesBenPayNodes = new Function("app", source + "\nreturn usesBenPayNodes;")({ registerExtension() {} });
+  const video = { id: 1, comfyClass: "BenpayVideo", inputs: [] };
+  const group = {
+    id: 10, subgraph: { _nodes: [video] },
+    resolveSubgraphOutputLink() { return { outputNode: video, link: { origin_slot: 0 } }; },
+  };
+  const save = {
+    id: 20, comfyClass: "SaveVideo", inputs: [{ type: "VIDEO" }],
+    getInputLink() { return { origin_id: 10, origin_slot: 0 }; },
+  };
+  const graph = { _nodes: [group, save], serialize() { assert.fail("serialized graph"); } };
+  assert.equal(usesBenPayNodes(graph, ["20"]), true);
+  assert.equal(usesBenPayNodes(graph, ["10"]), true);
+  assert.equal(usesBenPayNodes(graph, ["10:1"]), true);
+  const nested = { id: 30, subgraph: { _nodes: [group] }, resolveSubgraphOutputLink() { return { outputNode: group, link: { origin_slot: 0 } }; } };
+  assert.equal(usesBenPayNodes({ _nodes: [nested] }, ["30"]), true);
+  group.mode = 2;
+  assert.equal(usesBenPayNodes(graph), false);
+  group.mode = 4;
+  assert.equal(usesBenPayNodes(graph), false);
+  group.mode = 0;
+  const innerSave = { id: 2, comfyClass: "SaveVideo", inputs: [{ type: "VIDEO" }], getInputLink() { return { originIsIoNode: true, origin_slot: 0 }; } };
+  const receiver = {
+    id: 40, inputs: [{ type: "VIDEO", link: 7 }], subgraph: { _nodes: [innerSave] },
+    getInputLink() { assert.fail("subgraph getInputLink resolves the wrong side of the boundary"); },
+  };
+  const outerGraph = { _nodes: [video, receiver], getLink(id) { return id === 7 ? { origin_id: 1, origin_slot: 0 } : null; } };
+  receiver.graph = outerGraph;
+  assert.equal(usesBenPayNodes(outerGraph, ["40:2"]), true);
+});
+
+test("partial execution follows only the connected subgraph output", () => {
+  const usesBenPayNodes = new Function("app", source + "\nreturn usesBenPayNodes;")({ registerExtension() {} });
+  const video = { id: 1, comfyClass: "BenpayVideo", inputs: [] };
+  const image = { id: 2, comfyClass: "LoadImage", inputs: [] };
+  const group = {
+    id: 10, subgraph: { _nodes: [video, image] },
+    resolveSubgraphOutputLink(slot) {
+      return { outputNode: slot === 0 ? video : image, link: { origin_slot: 0 } };
+    },
+  };
+  const preview = { id: 20, inputs: [{ type: "IMAGE" }], getInputLink() { return { origin_id: 10, origin_slot: 1 }; } };
+  const graph = { _nodes: [group, preview] };
+  assert.equal(usesBenPayNodes(graph, ["20"]), false);
+  assert.equal(usesBenPayNodes(graph, ["10"]), true);
+});
+
+test("muted and bypassed BenPay nodes do not trigger configuration", async () => {
+  const plugin = loadPlugin();
+  await plugin.extension.setup();
+  controls(plugin).cancel.events.click();
+  for (const mode of [2, 4]) {
+    await plugin.run({ 1: { class_type: "BenpayVideo", mode } });
+  }
+  assert.equal(plugin.shown, 1);
+  assert.equal(plugin.queued.length, 2);
+});
+
+test("partial execution follows virtual output sources across subgraph boundaries", () => {
+  const usesBenPayNodes = new Function("app", source + "\nreturn usesBenPayNodes;")({ registerExtension() {} });
+  const video = { id: 1, comfyClass: "BenpayVideo", inputs: [] };
+  const group = { id: 10, subgraph: { _nodes: [video] } };
+  const virtual = {
+    id: 2, isVirtualNode: true, inputs: [],
+    resolveVirtualOutput(slot) {
+      assert.equal(slot, 0);
+      return { node: video, slot: 0 };
+    },
+  };
+  const save = { id: 3, inputs: [{ type: "VIDEO" }], getInputLink() { return { origin_id: 2, origin_slot: 0 }; } };
+  const graph = { _nodes: [group, virtual, save] };
+  assert.equal(usesBenPayNodes(graph, ["3"]), true);
+  video.mode = 2;
+  assert.equal(usesBenPayNodes(graph, ["3"]), false);
+  video.mode = 0;
+  virtual.mode = 2;
+  assert.equal(usesBenPayNodes(graph, ["3"]), false);
+});
+
+test("cyclic virtual connections terminate without submitting or serializing", () => {
+  const usesBenPayNodes = new Function("app", source + "\nreturn usesBenPayNodes;")({ registerExtension() {} });
+  const first = { id: 1, isVirtualNode: true, inputs: [] };
+  const second = { id: 2, isVirtualNode: true, inputs: [] };
+  first.resolveVirtualOutput = () => ({ node: second, slot: 0 });
+  second.resolveVirtualOutput = () => ({ node: first, slot: 0 });
+  const save = { id: 3, inputs: [{ type: "VIDEO" }], getInputLink() { return { origin_id: 1, origin_slot: 0 }; } };
+  assert.equal(usesBenPayNodes({ _nodes: [first, second, save] }, ["3"]), false);
 });

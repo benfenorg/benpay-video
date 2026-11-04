@@ -108,38 +108,113 @@ async function promptForMissingKey(startup = false) {
   }
 }
 
-function usesBenPayNodes(output, targets) {
-  const pending = targets?.length ? [...targets] : Object.keys(output);
-  const visited = new Set();
-  while (pending.length) {
-    const id = String(pending.pop());
-    if (visited.has(id)) continue;
-    visited.add(id);
-    const node = output[id];
-    if (!node) continue;
-    if (nodeTypes.has(node.class_type)) return true;
-    for (const input of Object.values(node.inputs || {})) {
-      if (
-        Array.isArray(input) && input.length === 2 &&
-        typeof input[0] === "string" && Number.isInteger(input[1]) && output[input[0]]
-      ) pending.push(input[0]);
+function bypassInputIndex(node, slot, type) {
+  const inputs = node.inputs || [];
+  if (type === "*" || type === "") return inputs.length > slot ? slot : 0;
+  const outputType = node.outputs?.[slot]?.type;
+  const compatible = (input) => input && (
+    globalThis.LiteGraph?.isValidConnection
+      ? LiteGraph.isValidConnection(input.type, outputType) && LiteGraph.isValidConnection(input.type, type)
+      : input.type === type
+  );
+  if (compatible(inputs[slot])) return slot;
+  const exact = inputs.findIndex((input) => input.type === type);
+  return exact >= 0 ? exact : inputs.findIndex(compatible);
+}
+
+function usesBenPayNodes(graph, targets) {
+  const nodes = new Map();
+  const entriesByNode = new Map();
+  function indexGraph(current, parent = null, ancestors = new Set()) {
+    if (!current || ancestors.has(current)) return;
+    const path = new Set([...ancestors, current]);
+    for (const node of current._nodes || current.nodes || []) {
+      const id = parent ? `${parent.id}:${node.id}` : String(node.id);
+      const entry = { id, node, parent, children: [] };
+      nodes.set(id, entry);
+      if (!entriesByNode.has(node)) entriesByNode.set(node, entry);
+      parent?.children.push(entry);
+      if (node.mode !== 2 && node.mode !== 4) indexGraph(node.subgraph, entry, path);
     }
+  }
+  indexGraph(graph);
+  const pending = (targets?.length ? targets.map(String) : [...nodes.keys()])
+    .map((id) => ({ entry: nodes.get(id) }));
+  const visited = new Set();
+  const visitedInputs = new Set();
+  function followInput(entry, index) {
+    const key = `${entry.id}:input:${index}`;
+    if (visitedInputs.has(key)) return;
+    visitedInputs.add(key);
+    const { node, parent } = entry;
+    const input = node.inputs?.[index];
+    // SubgraphNode.getInputLink resolves an inner output, not its outer input.
+    const link = node.graph
+      ? node.graph.getLink?.(input?.link) || node.graph.links?.[input?.link]
+      : node.getInputLink?.(index);
+    if (!link) return;
+    if (parent && link.originIsIoNode) {
+      followInput(parent, link.origin_slot);
+      return;
+    }
+    const id = parent ? `${parent.id}:${link.origin_id}` : String(link.origin_id);
+    pending.push({ entry: nodes.get(id), slot: link.origin_slot, type: input?.type });
+  }
+  while (pending.length) {
+    const { entry, slot, type } = pending.pop();
+    if (!entry) continue;
+    const { node } = entry;
+    const key = `${entry.id}:output:${slot ?? "all"}`;
+    if (visited.has(key) || node.mode === 2) continue;
+    visited.add(key);
+    if (node.mode === 4) {
+      // Bypassed nodes route compatible inputs and never execute themselves.
+      if (slot != null) {
+        const matching = bypassInputIndex(node, slot, type);
+        if (matching >= 0) followInput(entry, matching);
+      }
+      continue;
+    }
+    if (nodeTypes.has(node.comfyClass)) return true;
+    if (node.subgraph) {
+      if (slot == null) {
+        pending.push(...entry.children.map((child) => ({ entry: child })));
+      } else {
+        const resolved = node.resolveSubgraphOutputLink?.(slot);
+        if (resolved?.link.originIsIoNode) {
+          followInput(entry, resolved.link.origin_slot);
+        } else if (resolved?.outputNode) pending.push({
+          entry: nodes.get(`${entry.id}:${resolved.outputNode.id}`),
+          slot: resolved.link.origin_slot,
+          type,
+        });
+      }
+      continue;
+    }
+    if (node.isVirtualNode && slot != null) {
+      const source = node.resolveVirtualOutput?.(slot);
+      if (source) {
+        pending.push({ entry: entriesByNode.get(source.node), slot: source.slot, type });
+        continue;
+      }
+    }
+    for (let index = 0; index < (node.inputs?.length || 0); index++) followInput(entry, index);
   }
   return false;
 }
 
 function checkConfigurationBeforeQueueing() {
-  const queuePrompt = api.queuePrompt;
-  api.queuePrompt = async function (number, prompt, ...args) {
-    const usesBenPay = usesBenPayNodes(prompt.output || {}, args[0]?.partialExecutionTargets);
+  const queuePrompt = app.queuePrompt;
+  app.queuePrompt = async function (number, batchCount, options = {}, ...args) {
+    const targets = Array.isArray(options) ? options : options.queueNodeIds;
+    const usesBenPay = usesBenPayNodes(this.rootGraph || this.graph, targets);
     if (usesBenPay && !(await refreshStatus()).configured) {
       const saved = await showKeyDialog();
-      // A response without prompt_id is handled as an unsubmitted prompt.
-      // Cancellation is a normal user action, not an extension exception.
-      if (!saved) return { node_errors: {} };
+      // Stop before ComfyUI creates the batch or runs queued widget callbacks.
+      if (!saved) return false;
       if (!(await refreshStatus()).configured) throw new Error(t("keyMissing"));
     }
-    return queuePrompt.call(this, number, prompt, ...args);
+    return queuePrompt.call(this, number, batchCount, options, ...args);
   };
 }
 
